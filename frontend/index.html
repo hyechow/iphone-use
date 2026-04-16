@@ -222,7 +222,10 @@
 
     <!-- Middle -->
     <div class="panel" id="chat-panel">
-      <div class="panel-title">对话</div>
+      <div class="panel-title" style="justify-content:space-between;display:flex;align-items:center;">
+        对话
+        <button id="new-session-btn" onclick="newSession()" style="background:none;border:1px solid #333;color:#999;font-size:11px;padding:2px 8px;border-radius:4px;cursor:pointer;">新对话</button>
+      </div>
       <div id="chat-messages"></div>
       <div id="chat-input-wrap">
         <textarea id="instruction" rows="2" placeholder="输入自然语言指令，例如：打开微信"></textarea>
@@ -268,6 +271,13 @@
 
     // ── Chat & SSE ───────────────────────────────────────────────────────────
     let activeSource = null;
+    let currentSessionId = null;
+
+    function newSession() {
+      currentSessionId = null;
+      document.getElementById('chat-messages').innerHTML = '';
+      clearSteps();
+    }
 
     async function sendInstruction() {
       const textarea = document.getElementById('instruction');
@@ -285,10 +295,11 @@
         const res = await fetch('/api/run', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ instruction }),
+          body: JSON.stringify({ instruction, session_id: currentSessionId }),
         });
         if (!res.ok) throw new Error(await res.text());
-        const { task_id } = await res.json();
+        const { task_id, session_id } = await res.json();
+        currentSessionId = session_id;
         startStream(task_id);
       } catch (e) {
         appendMessage('assistant', '启动失败：' + e.message);

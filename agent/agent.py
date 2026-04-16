@@ -1,8 +1,15 @@
-import asyncio
-import base64
 from dataclasses import dataclass
+from typing import Annotated
 
-from agent.mcp_client import MCPClient
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import SystemMessage
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, StateGraph
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode, tools_condition
+from typing_extensions import TypedDict
+
+from agent.tools import TOOLS
 
 
 @dataclass
@@ -11,24 +18,41 @@ class AgentEvent:
     data: str  # text, or base64-encoded PNG for "screenshot"
 
 
-class PhoneAgent:
-    async def run(self, instruction: str, queue: asyncio.Queue[AgentEvent]):
-        client = MCPClient()
-        try:
-            await queue.put(AgentEvent(type="thinking", data="正在连接手机..."))
-            await client.connect()
+# ── LangGraph State ───────────────────────────────────────────────────────────
 
-            await queue.put(AgentEvent(type="thinking", data="截图中..."))
-            png_bytes = await client.screenshot()
-            b64 = base64.b64encode(png_bytes).decode()
-            await queue.put(AgentEvent(type="screenshot", data=b64))
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
 
-            # TODO: 接入真实 Claude agent 循环
-            await queue.put(AgentEvent(type="thinking", data=f"收到指令：{instruction}"))
-            await asyncio.sleep(0.5)
-            await queue.put(AgentEvent(type="done", data="框架已就绪，agent 逻辑待实现"))
 
-        except Exception as e:
-            await queue.put(AgentEvent(type="error", data=str(e)))
-        finally:
-            await client.close()
+# ── Graph Nodes ───────────────────────────────────────────────────────────────
+
+_llm = ChatAnthropic(model="claude-opus-4-6", max_tokens=1024).bind_tools(TOOLS)
+
+_system = SystemMessage(content=(
+    "你是一个 iPhone 操作助手。需要查看屏幕时，调用 take_screenshot 工具获取截图，"
+    "然后根据截图内容和用户指令给出操作建议。"
+))
+
+
+async def agent_node(state: State) -> dict:
+    response = await _llm.ainvoke([_system] + state["messages"])
+    return {"messages": [response]}
+
+
+# ── Build Graph ───────────────────────────────────────────────────────────────
+
+_checkpointer = MemorySaver()
+
+
+def _build_graph():
+    builder = StateGraph(State)
+    builder.add_node("agent", agent_node)
+    builder.add_node("tools", ToolNode(TOOLS))
+    builder.set_entry_point("agent")
+    builder.add_conditional_edges("agent", tools_condition)
+    builder.add_edge("tools", "agent")
+    builder.add_edge("agent", END)
+    return builder.compile(checkpointer=_checkpointer)
+
+
+_graph = _build_graph()
