@@ -11,6 +11,7 @@ dependencies = [
     "langchain-openai>=1.1.13",
     "langgraph>=1.1.6",
     "mcp>=1.27.0",
+    "ocrmac>=1.0.1",
     "sse-starlette>=3.3.4",
     "uvicorn>=0.44.0",
 ]
