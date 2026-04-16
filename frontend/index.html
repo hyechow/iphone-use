@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <title>iPhone Use</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f0f0f;
+      color: #e8e8e8;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      padding: 12px 20px;
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: .5px;
+      border-bottom: 1px solid #222;
+      color: #fff;
+    }
+
+    .layout {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 300px 1fr 320px;
+      gap: 1px;
+      background: #222;
+      overflow: hidden;
+    }
+
+    .panel {
+      background: #141414;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .panel-title {
+      padding: 10px 14px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .8px;
+      color: #666;
+      border-bottom: 1px solid #222;
+      flex-shrink: 0;
+    }
+
+    /* ── Left: screenshot ── */
+    #phone-panel {
+      align-items: center;
+    }
+
+    #phone-panel .panel-title {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    #refresh-btn {
+      background: none;
+      border: 1px solid #333;
+      color: #999;
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    #refresh-btn:hover { border-color: #555; color: #ccc; }
+
+    #screenshot-wrap {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+
+    #screenshot {
+      max-width: 100%;
+      max-height: 100%;
+      border-radius: 12px;
+      border: 1px solid #2a2a2a;
+      object-fit: contain;
+    }
+
+    #screenshot-placeholder {
+      color: #444;
+      font-size: 13px;
+      text-align: center;
+    }
+
+    /* ── Middle: chat ── */
+    #chat-panel {
+      justify-content: flex-end;
+    }
+
+    #chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .msg {
+      max-width: 85%;
+      padding: 9px 13px;
+      border-radius: 10px;
+      font-size: 14px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+    .msg.user {
+      align-self: flex-end;
+      background: #1a73e8;
+      color: #fff;
+    }
+    .msg.assistant {
+      align-self: flex-start;
+      background: #1e1e1e;
+      color: #ccc;
+      border: 1px solid #2a2a2a;
+    }
+
+    #chat-input-wrap {
+      padding: 14px;
+      display: flex;
+      gap: 8px;
+      border-top: 1px solid #222;
+      flex-shrink: 0;
+    }
+
+    #instruction {
+      flex: 1;
+      background: #1e1e1e;
+      border: 1px solid #2a2a2a;
+      color: #e8e8e8;
+      border-radius: 8px;
+      padding: 9px 12px;
+      font-size: 14px;
+      resize: none;
+      outline: none;
+    }
+    #instruction:focus { border-color: #444; }
+    #instruction::placeholder { color: #444; }
+
+    #send-btn {
+      background: #1a73e8;
+      border: none;
+      color: #fff;
+      padding: 0 18px;
+      border-radius: 8px;
+      font-size: 14px;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    #send-btn:disabled { background: #1e3a5f; color: #555; cursor: default; }
+    #send-btn:not(:disabled):hover { background: #1557b0; }
+
+    /* ── Right: steps ── */
+    #steps-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .step {
+      padding: 8px 11px;
+      border-radius: 7px;
+      font-size: 12.5px;
+      line-height: 1.5;
+      border-left: 3px solid transparent;
+      background: #1a1a1a;
+    }
+    .step.thinking  { border-color: #f0a500; }
+    .step.action    { border-color: #34a853; }
+    .step.screenshot { border-color: #4285f4; font-style: italic; color: #888; }
+    .step.done      { border-color: #34a853; color: #34a853; font-weight: 600; }
+    .step.error     { border-color: #ea4335; color: #ea4335; }
+
+    .step .label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: .6px;
+      opacity: .6;
+      margin-bottom: 3px;
+    }
+
+    .empty-hint {
+      color: #333;
+      font-size: 13px;
+      padding: 20px 12px;
+    }
+  </style>
+</head>
+<body>
+  <header>iPhone Use</header>
+
+  <div class="layout">
+    <!-- Left -->
+    <div class="panel" id="phone-panel">
+      <div class="panel-title">
+        手机画面
+        <button id="refresh-btn" onclick="refreshScreenshot()">刷新</button>
+      </div>
+      <div id="screenshot-wrap">
+        <div id="screenshot-placeholder">点击「刷新」获取截图</div>
+        <img id="screenshot" style="display:none" alt="screenshot" />
+      </div>
+    </div>
+
+    <!-- Middle -->
+    <div class="panel" id="chat-panel">
+      <div class="panel-title">对话</div>
+      <div id="chat-messages"></div>
+      <div id="chat-input-wrap">
+        <textarea id="instruction" rows="2" placeholder="输入自然语言指令，例如：打开微信"></textarea>
+        <button id="send-btn" onclick="sendInstruction()">发送</button>
+      </div>
+    </div>
+
+    <!-- Right -->
+    <div class="panel">
+      <div class="panel-title">操作步骤</div>
+      <div id="steps-list">
+        <div class="empty-hint">运行指令后，步骤将实时显示在这里</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ── Screenshot ──────────────────────────────────────────────────────────
+    async function refreshScreenshot() {
+      const btn = document.getElementById('refresh-btn');
+      btn.textContent = '加载中…';
+      btn.disabled = true;
+      try {
+        const res = await fetch('/api/screenshot');
+        if (!res.ok) throw new Error(await res.text());
+        const { image } = await res.json();
+        showScreenshot(image);
+      } catch (e) {
+        alert('截图失败：' + e.message);
+      } finally {
+        btn.textContent = '刷新';
+        btn.disabled = false;
+      }
+    }
+
+    function showScreenshot(b64) {
+      const img = document.getElementById('screenshot');
+      const placeholder = document.getElementById('screenshot-placeholder');
+      img.src = 'data:image/png;base64,' + b64;
+      img.style.display = 'block';
+      placeholder.style.display = 'none';
+    }
+
+    // ── Chat & SSE ───────────────────────────────────────────────────────────
+    let activeSource = null;
+
+    async function sendInstruction() {
+      const textarea = document.getElementById('instruction');
+      const instruction = textarea.value.trim();
+      if (!instruction) return;
+
+      const sendBtn = document.getElementById('send-btn');
+      sendBtn.disabled = true;
+      textarea.value = '';
+
+      appendMessage('user', instruction);
+      clearSteps();
+
+      try {
+        const res = await fetch('/api/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ instruction }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const { task_id } = await res.json();
+        startStream(task_id);
+      } catch (e) {
+        appendMessage('assistant', '启动失败：' + e.message);
+        sendBtn.disabled = false;
+      }
+    }
+
+    function startStream(taskId) {
+      if (activeSource) activeSource.close();
+
+      const source = new EventSource('/api/stream/' + taskId);
+      activeSource = source;
+
+      source.onmessage = (e) => {
+        const { type, data } = JSON.parse(e.data);
+
+        if (type === 'screenshot') {
+          showScreenshot(data);
+          addStep('screenshot', '截图已更新');
+        } else if (type === 'done') {
+          addStep('done', data);
+          appendMessage('assistant', data);
+          document.getElementById('send-btn').disabled = false;
+          source.close();
+        } else if (type === 'error') {
+          addStep('error', data);
+          appendMessage('assistant', '错误：' + data);
+          document.getElementById('send-btn').disabled = false;
+          source.close();
+        } else {
+          addStep(type, data);
+        }
+      };
+
+      source.onerror = () => {
+        source.close();
+        document.getElementById('send-btn').disabled = false;
+      };
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+    function appendMessage(role, text) {
+      const list = document.getElementById('chat-messages');
+      const div = document.createElement('div');
+      div.className = 'msg ' + role;
+      div.textContent = text;
+      list.appendChild(div);
+      list.scrollTop = list.scrollHeight;
+    }
+
+    function clearSteps() {
+      document.getElementById('steps-list').innerHTML = '';
+    }
+
+    function addStep(type, text) {
+      const list = document.getElementById('steps-list');
+      const div = document.createElement('div');
+      div.className = 'step ' + type;
+      div.innerHTML = `<div class="label">${type}</div>${escapeHtml(text)}`;
+      list.appendChild(div);
+      list.scrollTop = list.scrollHeight;
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    // Submit on Cmd/Ctrl+Enter
+    document.getElementById('instruction').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) sendInstruction();
+    });
+  </script>
+</body>
+</html>
