@@ -8,6 +8,7 @@ dependencies = [
     "anthropic>=0.95.0",
     "fastapi>=0.135.3",
     "langchain-anthropic>=1.4.0",
+    "langchain-openai>=1.1.13",
     "langgraph>=1.1.6",
     "mcp>=1.27.0",
     "sse-starlette>=3.3.4",

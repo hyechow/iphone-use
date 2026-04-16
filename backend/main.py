@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-from agent.agent import AgentEvent
+from agent.events import AgentEvent
 from agent.runner import PhoneAgent
 from agent.mcp_client import MCPClient
 
@@ -43,23 +43,23 @@ async def api_screenshot():
 
 class RunRequest(BaseModel):
     instruction: str
-    session_id: str | None = None
+    thread_id: str | None = None
 
 
 @app.post("/api/run")
 async def api_run(req: RunRequest):
-    session_id = req.session_id or str(uuid.uuid4())
+    thread_id = req.thread_id or str(uuid.uuid4())
     task_id = str(uuid.uuid4())
     queue: asyncio.Queue[AgentEvent | None] = asyncio.Queue()
     _task_queues[task_id] = queue
 
     async def _run():
         agent = PhoneAgent()
-        await agent.run(session_id, req.instruction, queue)
+        await agent.run(thread_id, req.instruction, queue)
         await queue.put(None)  # sentinel: stream end
 
     asyncio.create_task(_run())
-    return {"task_id": task_id, "session_id": session_id}
+    return {"task_id": task_id, "thread_id": thread_id}
 
 
 @app.get("/api/stream/{task_id}")

@@ -271,10 +271,10 @@
 
     // ── Chat & SSE ───────────────────────────────────────────────────────────
     let activeSource = null;
-    let currentSessionId = null;
+    let currentThreadId = null;
 
     function newSession() {
-      currentSessionId = null;
+      currentThreadId = null;
       document.getElementById('chat-messages').innerHTML = '';
       clearSteps();
     }
@@ -295,11 +295,11 @@
         const res = await fetch('/api/run', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ instruction, session_id: currentSessionId }),
+          body: JSON.stringify({ instruction, thread_id: currentThreadId }),
         });
         if (!res.ok) throw new Error(await res.text());
-        const { task_id, session_id } = await res.json();
-        currentSessionId = session_id;
+        const { task_id, thread_id } = await res.json();
+        currentThreadId = thread_id;
         startStream(task_id);
       } catch (e) {
         appendMessage('assistant', '启动失败：' + e.message);

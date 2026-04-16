@@ -2,12 +2,13 @@ import asyncio
 
 from langchain_core.messages import HumanMessage
 
-from agent.agent import AgentEvent, _graph
+from agent.agent import _graph
+from agent.events import AgentEvent
 
 
 class PhoneAgent:
-    async def run(self, session_id: str, instruction: str, queue: asyncio.Queue[AgentEvent]):
-        config = {"configurable": {"thread_id": session_id}}
+    async def run(self, thread_id: str, instruction: str, queue: asyncio.Queue[AgentEvent]):
+        config = {"configurable": {"thread_id": thread_id}}
         input_state = {
             "messages": [HumanMessage(content=instruction)],
         }
@@ -19,7 +20,8 @@ class PhoneAgent:
 
                 # 工具调用完成：截图结果推给前端
                 if kind == "on_tool_end" and name == "take_screenshot":
-                    b64 = event["data"].get("output", "")
+                    output = event["data"].get("output", "")
+                    b64 = output.content if hasattr(output, "content") else output
                     if b64:
                         await queue.put(AgentEvent(type="screenshot", data=b64))
 

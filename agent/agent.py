@@ -1,8 +1,8 @@
-from dataclasses import dataclass
 from typing import Annotated
 
-from langchain_anthropic import ChatAnthropic
+from dotenv import load_dotenv
 from langchain_core.messages import SystemMessage
+from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
@@ -10,13 +10,9 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from typing_extensions import TypedDict
 
 from agent.tools import TOOLS
+from llm.provider_config import resolve_chat_provider_config
 
-
-@dataclass
-class AgentEvent:
-    type: str  # "screenshot" | "thinking" | "action" | "done" | "error"
-    data: str  # text, or base64-encoded PNG for "screenshot"
-
+load_dotenv()
 
 # ── LangGraph State ───────────────────────────────────────────────────────────
 
@@ -26,7 +22,12 @@ class State(TypedDict):
 
 # ── Graph Nodes ───────────────────────────────────────────────────────────────
 
-_llm = ChatAnthropic(model="claude-opus-4-6", max_tokens=1024).bind_tools(TOOLS)
+_cfg = resolve_chat_provider_config()
+_llm = ChatOpenAI(
+    model=_cfg.model,
+    api_key=_cfg.api_key,
+    base_url=_cfg.base_url,
+).bind_tools(TOOLS)
 
 _system = SystemMessage(content=(
     "你是一个 iPhone 操作助手。需要查看屏幕时，调用 take_screenshot 工具获取截图，"
