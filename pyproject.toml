@@ -21,4 +21,6 @@ dependencies = [
     "numpy>=1.14.5,<=2.3.5",
     "uvicorn>=0.44.0",
     "pillow>=12.2.0",
+    "rich>=13.0.0",
+    "prompt-toolkit>=3.0.0",
 ]

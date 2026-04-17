@@ -16,7 +16,7 @@ def _ts() -> str:
 
 
 async def _take_initial_screenshot(thread_id: str) -> str:
-    """Take a screenshot and return resized base64 PNG."""
+    """Take a screenshot via MCP and return resized base64 PNG."""
     client = await get_client(thread_id)
     png_bytes = await client.screenshot()
     img = Image.open(io.BytesIO(png_bytes))
@@ -47,7 +47,7 @@ class PhoneAgent:
             async for event in _graph.astream_events(input_state, config, version="v2"):
                 kind = event["event"]
                 name = event.get("name", "")
-                print(f"{_ts()} graph event: {kind} name={name!r}", flush=True)
+                # print(f"{_ts()} graph event: {kind} name={name!r}", flush=True)
 
                 # 工具调用完成：截图结果推给前端
                 if kind == "on_tool_end" and name == "take_screenshot":

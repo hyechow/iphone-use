@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import json
 import uuid
 from pathlib import Path
@@ -9,11 +8,26 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+import base64
+import io
+
 from agent.events import AgentEvent
-from agent.runner import PhoneAgent
 from agent.mcp_client import MCPClient
+from agent.runner import PhoneAgent
+from PIL import Image
 
 app = FastAPI()
+
+# Shared MCP client for independent screenshot polling
+_screenshot_client: MCPClient | None = None
+
+
+async def get_screenshot_client() -> MCPClient:
+    global _screenshot_client
+    if _screenshot_client is None or _screenshot_client._session is None:
+        _screenshot_client = MCPClient()
+        await _screenshot_client.connect()
+    return _screenshot_client
 
 FRONTEND = Path(__file__).parent.parent / "frontend" / "index.html"
 
@@ -30,15 +44,14 @@ async def index():
 
 @app.get("/api/screenshot")
 async def api_screenshot():
-    client = MCPClient()
-    try:
-        await client.connect()
-        png_bytes = await client.screenshot()
-        return {"image": base64.b64encode(png_bytes).decode()}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        await client.close()
+    client = await get_screenshot_client()
+    png_bytes = await client.screenshot()
+    img = Image.open(io.BytesIO(png_bytes))
+    small = img.resize((img.width // 2, img.height // 2), Image.LANCZOS)
+    buf = io.BytesIO()
+    small.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    return {"image": b64}
 
 
 class RunRequest(BaseModel):
