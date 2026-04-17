@@ -211,6 +211,7 @@ def offline_mode(user_input: str):
     screen_desc = build_screen_desc(ocr_results, icons, win_w, win_h)
 
     print(f"\n🤖 LLM 推理中...")
+    print(f"   screen_desc: {screen_desc}")
     response = run_llm(screen_desc, user_input)
     print(f"   回复: {response.content}")
 
@@ -256,6 +257,7 @@ async def _live_run(session, user_input: str):
     screen_desc = build_screen_desc(ocr_results, icons, win_w, win_h)
 
     print(f"\n🤖 LLM 推理中...")
+    print(f"   screen_desc: {screen_desc}")
     response = run_llm(screen_desc, user_input)
     print(f"   回复: {response.content}")
 
