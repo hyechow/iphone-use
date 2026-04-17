@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from ocrmac.ocrmac import OCR
 
-screenshot_path = Path(__file__).parent.parent / "screenshot.png"
+screenshot_path = Path(__file__).parent.parent / "images" / "screenshot.png"
 
 if not screenshot_path.exists():
     print("screenshot.png 不存在，请先运行 scripts/screenshot_test.py")

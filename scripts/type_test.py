@@ -70,7 +70,7 @@ async def main():
             # 4. 截图确认
             print("📸 输入后截图...")
             after = await screenshot(session)
-            out = Path(__file__).parent.parent / "screenshot_after.png"
+            out = Path(__file__).parent.parent / "images" / "screenshot_after.png"
             out.write_bytes(after)
             print(f"   已保存: {out}")
 

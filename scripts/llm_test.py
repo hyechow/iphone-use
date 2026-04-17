@@ -29,7 +29,7 @@ async def test_vision():
     )
 
     # 用已有截图，没有就跳过图像
-    screenshot_path = Path("screenshot.png")
+    screenshot_path = Path(__file__).parent.parent / "images" / "screenshot.png"
     if screenshot_path.exists():
         b64 = base64.b64encode(screenshot_path.read_bytes()).decode()
         content = [

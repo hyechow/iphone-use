@@ -3,5 +3,4 @@
 __pycache__/
 *.pyc
 .env
-*.png
-*.jpg
+images/

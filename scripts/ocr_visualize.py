@@ -7,8 +7,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from PIL import Image, ImageDraw, ImageFont
 from agent.utils import ocr_from_bytes
 
-SCREENSHOT = Path(__file__).parent.parent / "screenshot.png"
-OUTPUT = Path(__file__).parent.parent / "ocr_vis.png"
+SCREENSHOT = Path(__file__).parent.parent / "images" / "screenshot.png"
+OUTPUT = Path(__file__).parent.parent / "images" / "ocr_vis.png"
 TARGET = "美团"  # 高亮显示的目标文字
 
 

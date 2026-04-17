@@ -33,7 +33,7 @@ async def main():
             for item in result.content:
                 if item.type == "image" and hasattr(item, "data"):
                     img_bytes = base64.b64decode(item.data)
-                    out = Path("screenshot.png")
+                    out = Path(__file__).parent.parent / "images" / "screenshot.png"
                     out.write_bytes(img_bytes)
                     print(f"\n✅ 图片已保存：{out.resolve()}  ({len(img_bytes)//1024} KB)")
                     break

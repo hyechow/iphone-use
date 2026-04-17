@@ -1,5 +1,6 @@
 """Agent utility functions."""
 import base64
+import io
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -10,6 +11,10 @@ from ocrmac.ocrmac import OCR
 # Default icon detection model path (exported by ultralytics)
 _DEFAULT_ICON_MODEL = Path.home() / ".mirroir-mcp/models/icon_detect_download/icon_detect/model.mlpackage"
 _icon_model = None
+
+# Project directories
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+IMAGE_DIR = PROJECT_ROOT / "images"
 
 LANGUAGE_PREFERENCE = ["zh-Hans", "en-US"]
 
@@ -119,7 +124,7 @@ def _get_icon_model(model_path: str | Path | None = None):
         path = model_path or _DEFAULT_ICON_MODEL
         if not Path(path).exists():
             raise FileNotFoundError(f"Icon model not found: {path}")
-        _icon_model = YOLO(str(path))
+        _icon_model = YOLO(str(path), task="detect")
     return _icon_model
 
 
@@ -139,7 +144,18 @@ def detect_icons(
         List of IconResult sorted by confidence descending.
     """
     model = _get_icon_model(model_path)
-    results = model.predict(source=image_or_path, conf=conf, verbose=False)
+    source = image_or_path
+    if isinstance(image_or_path, bytes):
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        tmp.write(image_or_path)
+        tmp.close()
+        try:
+            results = model.predict(source=tmp.name, conf=conf, verbose=False)
+        finally:
+            Path(tmp.name).unlink(missing_ok=True)
+    else:
+        results = model.predict(source=source, conf=conf, verbose=False)
     icons = []
     for box in results[0].boxes:
         x1, y1, x2, y2 = box.xyxy[0].tolist()

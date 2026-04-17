@@ -8,8 +8,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from PIL import Image, ImageDraw, ImageFont
 from agent.utils import detect_icons
 
-SCREENSHOT = Path(__file__).parent.parent / "screenshot.png"
-OUTPUT = Path(__file__).parent.parent / "icon_detect_vis.png"
+SCREENSHOT = Path(__file__).parent.parent / "images" / "screenshot.png"
+OUTPUT = Path(__file__).parent.parent / "images" / "icon_detect_vis.png"
 
 if not SCREENSHOT.exists():
     print("screenshot.png 不存在，请先运行 scripts/screenshot_test.py")

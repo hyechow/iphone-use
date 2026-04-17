@@ -71,7 +71,7 @@ async def main():
             after = await session.call_tool("screenshot", {})
             for item in after.content:
                 if item.type == "image" and hasattr(item, "data"):
-                    out = Path(__file__).parent.parent / "screenshot_after.png"
+                    out = Path(__file__).parent.parent / "images" / "screenshot_after.png"
                     out.write_bytes(base64.b64decode(item.data))
                     print(f"   已保存: {out}")
                     break
