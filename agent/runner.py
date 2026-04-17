@@ -1,9 +1,7 @@
-import asyncio
 import base64
 import io
-import time
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from PIL import Image
 
 from agent.agent import _graph
@@ -11,14 +9,10 @@ from agent.events import AgentEvent
 from agent.sessions import close_session, get_client
 
 
-def _ts() -> str:
-    return f"[{time.strftime('%H:%M:%S')}]"
-
-
-async def _take_initial_screenshot(thread_id: str) -> str:
-    """Take a screenshot via MCP and return resized base64 PNG."""
-    client = await get_client(thread_id)
-    png_bytes = await client.screenshot()
+def _take_initial_screenshot(thread_id: str) -> str:
+    """Take a screenshot and return resized base64 PNG."""
+    client = get_client(thread_id)
+    png_bytes = client.screenshot()
     img = Image.open(io.BytesIO(png_bytes))
     small = img.resize((img.width // 2, img.height // 2), Image.LANCZOS)
     buf = io.BytesIO()
@@ -27,13 +21,12 @@ async def _take_initial_screenshot(thread_id: str) -> str:
 
 
 class PhoneAgent:
-    async def run(self, thread_id: str, instruction: str, queue: asyncio.Queue[AgentEvent]):
+    def run(self, thread_id: str, instruction: str):
+        """Run agent synchronously. Yields AgentEvent in real-time."""
         config = {"configurable": {"thread_id": thread_id}}
 
-        print(f"{_ts()} runner: taking initial screenshot", flush=True)
-        b64 = await _take_initial_screenshot(thread_id)
-        await queue.put(AgentEvent(type="screenshot", data=b64))
-        print(f"{_ts()} runner: screenshot ready ({len(b64)} bytes base64)", flush=True)
+        b64 = _take_initial_screenshot(thread_id)
+        yield AgentEvent(type="screenshot", data=b64)
 
         input_state = {
             "messages": [HumanMessage(content=[
@@ -41,39 +34,73 @@ class PhoneAgent:
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
             ])],
         }
-        print(f"{_ts()} runner: starting graph stream", flush=True)
 
         try:
-            async for event in _graph.astream_events(input_state, config, version="v2"):
-                kind = event["event"]
-                name = event.get("name", "")
-                # print(f"{_ts()} graph event: {kind} name={name!r}", flush=True)
+            in_think = False
+            think_buf = ""
 
-                # 工具调用完成：截图结果推给前端
-                if kind == "on_tool_end" and name == "take_screenshot":
-                    output = event["data"].get("output", "")
-                    b64 = output.content if hasattr(output, "content") else output
-                    if b64:
-                        await queue.put(AgentEvent(type="screenshot", data=b64))
+            for item in _graph.stream(input_state, config, stream_mode=["messages", "updates"], version="v2"):
+                mode = item["type"]
+                data = item["data"]
 
-                # LLM token 流
-                elif kind == "on_chat_model_stream":
-                    chunk = event["data"]["chunk"]
-                    token = chunk.content
-                    if isinstance(token, str) and token:
-                        await queue.put(AgentEvent(type="thinking", data=token))
-                    elif isinstance(token, list):
-                        for part in token:
-                            if isinstance(part, dict) and part.get("type") == "text":
-                                text = part.get("text", "")
-                                if text:
-                                    await queue.put(AgentEvent(type="thinking", data=text))
+                if mode == "messages":
+                    msg, meta = data
+                    if meta.get("langgraph_node") != "agent":
+                        continue
+                    token = msg.content if isinstance(msg.content, str) else None
+                    if not token:
+                        continue
 
-            print(f"{_ts()} runner: graph stream finished", flush=True)
-            await queue.put(AgentEvent(type="done", data="完成"))
+                    # Parse <think...</think blocks into reasoning events
+                    if in_think:
+                        end_idx = token.find("</think")
+                        if end_idx >= 0:
+                            think_buf += token[:end_idx]
+                            if think_buf.strip():
+                                yield AgentEvent(type="reasoning", data=think_buf)
+                            think_buf = ""
+                            token = token[end_idx + 8:]
+                            in_think = False
+                            if token.strip():
+                                yield AgentEvent(type="thinking", data=token)
+                        else:
+                            think_buf += token
+                    else:
+                        start_idx = token.find("<think")
+                        if start_idx >= 0:
+                            if start_idx > 0 and token[:start_idx].strip():
+                                yield AgentEvent(type="thinking", data=token[:start_idx])
+                            rest = token[start_idx + 6:]
+                            gt = rest.find(">")
+                            rest = rest[gt + 1:] if gt >= 0 else ""
+                            end_idx = rest.find("</think")
+                            if end_idx >= 0:
+                                if rest[:end_idx].strip():
+                                    yield AgentEvent(type="reasoning", data=rest[:end_idx])
+                                rest = rest[end_idx + 8:]
+                                if rest.strip():
+                                    yield AgentEvent(type="thinking", data=rest)
+                            else:
+                                think_buf = rest
+                                in_think = True
+                        else:
+                            yield AgentEvent(type="thinking", data=token)
+
+                elif mode == "updates":
+                    for node_name, update in data.items():
+                        if node_name == "tools":
+                            for msg in update.get("messages", []):
+                                if isinstance(msg, ToolMessage) and msg.name == "take_screenshot":
+                                    b64 = msg.content
+                                    if isinstance(b64, str) and len(b64) > 100:
+                                        yield AgentEvent(type="screenshot", data=b64)
+
+            if in_think and think_buf.strip():
+                yield AgentEvent(type="reasoning", data=think_buf)
+
+            yield AgentEvent(type="done", data="完成")
 
         except Exception as e:
-            print(f"{_ts()} runner: exception {e!r}", flush=True)
-            await queue.put(AgentEvent(type="error", data=str(e)))
+            yield AgentEvent(type="error", data=str(e))
         finally:
-            await close_session(thread_id)
+            close_session(thread_id)

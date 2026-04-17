@@ -1,16 +1,20 @@
 """Terminal REPL for iPhone agent interaction."""
 
-import asyncio
+import os
 
 from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
 
 from agent.events import AgentEvent
 from agent.runner import PhoneAgent
 
 console = Console()
+_width = os.get_terminal_size().columns
 
 EVENT_ICONS = {
     "thinking":   "💭",
+    "reasoning":  "🧠",
     "screenshot": "📸",
     "action":     "👆",
     "done":       "✅",
@@ -18,61 +22,79 @@ EVENT_ICONS = {
 }
 
 
-async def consume_events(queue: asyncio.Queue[AgentEvent | None]):
-    """Print agent events as they arrive. Returns on None sentinel."""
-    buffer = ""
-    while True:
-        event: AgentEvent | None = await queue.get()
-        if event is None:
-            return
+def _separator():
+    console.print(f"[dim]{'─' * _width}[/dim]")
 
-        if event.type == "thinking":
-            buffer += event.data
-            if "\n" in buffer:
-                lines = buffer.split("\n")
-                for line in lines[:-1]:
-                    console.print(f"  {EVENT_ICONS.get('thinking', '')} {line}", style="dim italic")
-                buffer = lines[-1]
+
+class EventDisplay:
+    """Stateful display for streaming agent events."""
+
+    def __init__(self):
+        self.buffer = ""
+        self.thinking_lines: list[str] = []
+
+    def _flush_thinking(self):
+        if self.buffer.strip():
+            self.thinking_lines.append(self.buffer)
+            self.buffer = ""
+        if self.thinking_lines:
+            console.print()
+            for line in self.thinking_lines:
+                console.print(f"  [dim italic]{line}[/dim italic]")
+            self.thinking_lines.clear()
+
+    def process(self, event: AgentEvent):
+        if event.type == "reasoning":
+            self._flush_thinking()
+            console.print()
+            console.print(f"  [dim]{EVENT_ICONS['reasoning']} 推理过程:[/dim]")
+            for line in event.data.strip().split("\n"):
+                if line.strip():
+                    console.print(f"    [dim]{line}[/dim]")
+        elif event.type == "thinking":
+            self.buffer += event.data
+            if "\n" in self.buffer:
+                lines = self.buffer.split("\n")
+                self.thinking_lines.extend(lines[:-1])
+                self.buffer = lines[-1]
         else:
-            if buffer.strip():
-                console.print(f"  {EVENT_ICONS.get('thinking', '')} {buffer}", style="dim italic")
-                buffer = ""
-
+            self._flush_thinking()
             icon = EVENT_ICONS.get(event.type, "")
             if event.type == "screenshot":
-                console.print(f"  {icon} 截图已更新", style="green")
+                console.print()
+                console.print(f"  {icon} [green]截图已更新[/green]")
             elif event.type == "done":
-                console.print(f"\n  {icon} {event.data}\n", style="bold green")
-                return
+                console.print()
+                console.print(f"  {icon} [bold green]{event.data}[/bold green]")
+                _separator()
             elif event.type == "error":
-                console.print(f"\n  {icon} {event.data}\n", style="bold red")
-                return
+                console.print()
+                console.print(f"  {icon} [bold red]{event.data}[/bold red]")
+                _separator()
             else:
-                console.print(f"  {icon} {event.data}", style="yellow")
+                console.print(f"  {icon} [yellow]{event.data}[/yellow]")
+
+    def flush(self):
+        self._flush_thinking()
 
 
-async def run_agent(thread_id: str, instruction: str):
-    """Run agent and display events."""
-    queue: asyncio.Queue[AgentEvent | None] = asyncio.Queue()
-    agent = PhoneAgent()
-
-    task = asyncio.create_task(agent.run(thread_id, instruction, queue))
-    try:
-        await consume_events(queue)
-        await task
-    except asyncio.CancelledError:
-        console.print("\n  ⏹ 已中断", style="yellow")
-
-
-async def repl():
+def main():
     import uuid
 
+    agent = PhoneAgent()
+    display = EventDisplay()
     thread_id: str | None = None
-    console.print("[bold]iPhone Agent CLI[/bold]  输入指令控制手机，/new 新对话，/quit 退出\n")
+
+    console.print(Panel(
+        "[bold]iPhone Agent CLI[/bold]\n"
+        "输入指令控制手机 | [cyan]/new[/cyan] 新对话 | [cyan]/quit[/cyan] 退出",
+        border_style="bright_black",
+        padding=(0, 1),
+    ))
 
     while True:
         try:
-            instruction = await asyncio.to_thread(input, "❯ ")
+            instruction = input("\n❯ ")
         except (EOFError, KeyboardInterrupt):
             console.print("\n再见 👋")
             break
@@ -85,18 +107,15 @@ async def repl():
             break
         if instruction == "/new":
             thread_id = None
-            console.print("[yellow]已开始新对话[/yellow]\n")
+            console.print("[yellow]已开始新对话[/yellow]")
+            _separator()
             continue
 
         if thread_id is None:
             thread_id = str(uuid.uuid4())
 
-        console.print()
-        await run_agent(thread_id, instruction)
-
-
-def main():
-    asyncio.run(repl())
+        for event in agent.run(thread_id, instruction):
+            display.process(event)
 
 
 if __name__ == "__main__":

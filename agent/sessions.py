@@ -1,18 +1,18 @@
-from agent.mcp_client import MCPClient
+from agent.sync_mcp_client import SyncMCPClient
 
-_clients: dict[str, MCPClient] = {}
+_clients: dict[str, SyncMCPClient] = {}
 
 
-async def get_client(thread_id: str) -> MCPClient:
+def get_client(thread_id: str) -> SyncMCPClient:
     client = _clients.get(thread_id)
-    if client is None or client._session is None:
-        client = MCPClient()
-        await client.connect()
+    if client is None or client._proc is None:
+        client = SyncMCPClient()
+        client.connect()
         _clients[thread_id] = client
     return client
 
 
-async def close_session(thread_id: str):
+def close_session(thread_id: str):
     client = _clients.pop(thread_id, None)
     if client:
-        await client.close()
+        client.close()

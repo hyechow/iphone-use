@@ -23,7 +23,6 @@ class State(TypedDict):
 # ── Graph Nodes ───────────────────────────────────────────────────────────────
 
 _cfg = resolve_chat_provider_config(provider="modelscope", model="Qwen/Qwen3.5-35B-A3B")
-print(f"Agent LLM: {_cfg.provider} / {_cfg.model}")
 _llm = ChatOpenAI(
     model=_cfg.model,
     api_key=_cfg.api_key,
@@ -63,9 +62,9 @@ def _inject_screenshot_images(messages: list) -> list:
     return result
 
 
-async def agent_node(state: State) -> dict:
+def agent_node(state: State) -> dict:
     messages = _inject_screenshot_images(state["messages"])
-    response = await _llm.ainvoke([_system] + messages)
+    response = _llm.invoke([_system] + messages)
     return {"messages": [response]}
 
 

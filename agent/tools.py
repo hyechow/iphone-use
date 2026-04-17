@@ -10,11 +10,11 @@ from agent.utils import home_indicator_coords
 
 
 @tool
-async def take_screenshot(config: RunnableConfig) -> str:
+def take_screenshot(config: RunnableConfig) -> str:
     """Take a screenshot of the current iPhone screen. Returns a base64-encoded PNG image."""
     session_id = config["configurable"]["thread_id"]
-    client = await get_client(session_id)
-    png_bytes = await client.screenshot()
+    client = get_client(session_id)
+    png_bytes = client.screenshot()
     # Retina screenshots are 2×; resize to logical pixels to reduce token cost
     img = Image.open(io.BytesIO(png_bytes))
     small = img.resize((img.width // 2, img.height // 2), Image.LANCZOS)
@@ -24,7 +24,7 @@ async def take_screenshot(config: RunnableConfig) -> str:
 
 
 @tool
-async def tap_screen(x: float, y: float, config: RunnableConfig) -> str:
+def tap_screen(x: float, y: float, config: RunnableConfig) -> str:
     """Tap a position on the iPhone screen.
 
     Args:
@@ -32,22 +32,22 @@ async def tap_screen(x: float, y: float, config: RunnableConfig) -> str:
         y: Normalized y coordinate (0-1000, top=0, bottom=1000)
     """
     session_id = config["configurable"]["thread_id"]
-    client = await get_client(session_id)
+    client = get_client(session_id)
     # Convert normalized 0-1000 → logical pixels (window is 318×701)
     lx = x / 1000 * 318
     ly = y / 1000 * 701
-    result = await client.tap(lx, ly)
+    result = client.tap(lx, ly)
     return result or f"Tapped at ({lx:.0f}, {ly:.0f})"
 
 
 @tool
-async def go_to_home_screen(config: RunnableConfig) -> str:
+def go_to_home_screen(config: RunnableConfig) -> str:
     """Return to the iPhone home screen by tapping the home indicator bar at the bottom."""
     session_id = config["configurable"]["thread_id"]
-    client = await get_client(session_id)
+    client = get_client(session_id)
     # Window size is 318x701 for the standard iPhone Mirroring window
     x, y = home_indicator_coords(318, 701)
-    result = await client.tap(x, y)
+    result = client.tap(x, y)
     return result or "Tapped home indicator"
 
 
