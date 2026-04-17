@@ -2,9 +2,14 @@
 import base64
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from ocrmac.ocrmac import OCR
+
+# Default icon detection model path (exported by ultralytics)
+_DEFAULT_ICON_MODEL = Path.home() / ".mirroir-mcp/models/icon_detect_download/icon_detect/model.mlpackage"
+_icon_model = None
 
 LANGUAGE_PREFERENCE = ["zh-Hans", "en-US"]
 
@@ -83,3 +88,61 @@ def is_home_screen(results: list[OcrResult]) -> bool:
     has_search = any("搜索" in r.text and r.y < 0.2 for r in results)
 
     return has_clock and has_search
+
+
+# ---------------------------------------------------------------------------
+# Icon detection (YOLO via CoreML)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class IconResult:
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    confidence: float
+
+    @property
+    def center(self) -> tuple[float, float]:
+        return (self.x1 + self.x2) / 2, (self.y1 + self.y2) / 2
+
+    @property
+    def area(self) -> float:
+        return (self.x2 - self.x1) * (self.y2 - self.y1)
+
+
+def _get_icon_model(model_path: str | Path | None = None):
+    """Load (and cache) the icon detection model."""
+    global _icon_model
+    if _icon_model is None:
+        from ultralytics import YOLO
+        path = model_path or _DEFAULT_ICON_MODEL
+        if not Path(path).exists():
+            raise FileNotFoundError(f"Icon model not found: {path}")
+        _icon_model = YOLO(str(path))
+    return _icon_model
+
+
+def detect_icons(
+    image_or_path: str | Path | bytes,
+    conf: float = 0.3,
+    model_path: str | Path | None = None,
+) -> list[IconResult]:
+    """Detect icons in an image using the YOLO CoreML model.
+
+    Args:
+        image_or_path: file path (str/Path) or raw PNG bytes.
+        conf: minimum confidence threshold (default 0.3).
+        model_path: override default model path.
+
+    Returns:
+        List of IconResult sorted by confidence descending.
+    """
+    model = _get_icon_model(model_path)
+    results = model.predict(source=image_or_path, conf=conf, verbose=False)
+    icons = []
+    for box in results[0].boxes:
+        x1, y1, x2, y2 = box.xyxy[0].tolist()
+        icons.append(IconResult(x1=x1, y1=y1, x2=x2, y2=y2, confidence=float(box.conf[0])))
+    icons.sort(key=lambda i: i.confidence, reverse=True)
+    return icons
