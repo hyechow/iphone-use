@@ -1,5 +1,7 @@
 import base64
 import io
+import subprocess
+import time
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
@@ -51,4 +53,23 @@ def go_to_home_screen(config: RunnableConfig) -> str:
     return result or "Tapped home indicator"
 
 
-TOOLS = [take_screenshot, tap_screen, go_to_home_screen]
+
+@tool
+def type_text(text: str) -> str:
+    """Type text into the currently focused input field on the iPhone.
+
+    Uses clipboard paste (pbcopy + Cmd+V) to support Chinese and all Unicode.
+
+    Args:
+        text: The text to type into the input field.
+    """
+    subprocess.run(["pbcopy"], input=text.encode(), check=True)
+    time.sleep(0.1)
+    subprocess.run([
+        "osascript", "-e",
+        'tell application "System Events" to keystroke "v" using command down',
+    ], check=True)
+    return f"Typed: {text!r}"
+
+
+TOOLS = [take_screenshot, tap_screen, go_to_home_screen, type_text]
