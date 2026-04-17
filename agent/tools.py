@@ -1,9 +1,12 @@
 import base64
+import io
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
+from PIL import Image
 
 from agent.sessions import get_client
+from agent.utils import home_indicator_coords
 
 
 @tool
@@ -12,7 +15,40 @@ async def take_screenshot(config: RunnableConfig) -> str:
     session_id = config["configurable"]["thread_id"]
     client = await get_client(session_id)
     png_bytes = await client.screenshot()
-    return base64.b64encode(png_bytes).decode()
+    # Retina screenshots are 2×; resize to logical pixels to reduce token cost
+    img = Image.open(io.BytesIO(png_bytes))
+    small = img.resize((img.width // 2, img.height // 2), Image.LANCZOS)
+    buf = io.BytesIO()
+    small.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
 
 
-TOOLS = [take_screenshot]
+@tool
+async def tap_screen(x: float, y: float, config: RunnableConfig) -> str:
+    """Tap a position on the iPhone screen.
+
+    Args:
+        x: Normalized x coordinate (0-1000, left=0, right=1000)
+        y: Normalized y coordinate (0-1000, top=0, bottom=1000)
+    """
+    session_id = config["configurable"]["thread_id"]
+    client = await get_client(session_id)
+    # Convert normalized 0-1000 → logical pixels (window is 318×701)
+    lx = x / 1000 * 318
+    ly = y / 1000 * 701
+    result = await client.tap(lx, ly)
+    return result or f"Tapped at ({lx:.0f}, {ly:.0f})"
+
+
+@tool
+async def go_to_home_screen(config: RunnableConfig) -> str:
+    """Return to the iPhone home screen by tapping the home indicator bar at the bottom."""
+    session_id = config["configurable"]["thread_id"]
+    client = await get_client(session_id)
+    # Window size is 318x701 for the standard iPhone Mirroring window
+    x, y = home_indicator_coords(318, 701)
+    result = await client.tap(x, y)
+    return result or "Tapped home indicator"
+
+
+TOOLS = [take_screenshot, tap_screen, go_to_home_screen]

@@ -25,6 +25,11 @@ class MCPClient:
                 return base64.b64decode(item.data)
         raise RuntimeError("No image in screenshot response")
 
+    async def tap(self, x: float, y: float) -> str:
+        assert self._session, "Not connected"
+        result = await self._session.call_tool("tap", {"x": x, "y": y})
+        return result.content[0].text if result.content else ""
+
     async def list_tools(self) -> list[str]:
         assert self._session, "Not connected"
         result = await self._session.list_tools()
