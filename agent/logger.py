@@ -11,7 +11,6 @@ Usage::
     logger.log(context_messages, response, thread_id="session-1")
 """
 import json
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -22,6 +21,7 @@ from rich.rule import Rule
 from rich.text import Text
 
 _console = Console(highlight=False)
+_TOKEN_ENCODER = None
 
 # ── Message summarisation helpers ─────────────────────────────────────────────
 
@@ -102,8 +102,7 @@ def _msg_to_dict(msg: BaseMessage) -> dict:
         result["tool_name"] = getattr(msg, "name", None)
         result["tool_call_id"] = getattr(msg, "tool_call_id", None)
 
-    # Token usage (if present in response_metadata)
-    usage = getattr(msg, "response_metadata", {}).get("token_usage")
+    usage = _extract_token_usage(msg)
     if usage:
         result["usage"] = usage
 
@@ -139,6 +138,127 @@ def _raw_msg_to_dict(msg: BaseMessage) -> dict:
     return json.loads(json.dumps(raw, ensure_ascii=False, default=str))
 
 
+def _normalize_token_usage(usage: dict | None) -> dict:
+    if not usage:
+        return {}
+
+    input_tokens = usage.get("input_tokens") or usage.get("prompt_tokens")
+    output_tokens = usage.get("output_tokens") or usage.get("completion_tokens")
+    total_tokens = usage.get("total_tokens")
+    if total_tokens is None and input_tokens is not None and output_tokens is not None:
+        total_tokens = input_tokens + output_tokens
+
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "estimated": False,
+        "raw": usage,
+    }
+
+
+def _has_any_tokens(usage: dict) -> bool:
+    return any(
+        isinstance(usage.get(key), int | float)
+        for key in ("input_tokens", "output_tokens", "total_tokens")
+    )
+
+
+def _has_positive_tokens(usage: dict) -> bool:
+    return any(
+        isinstance(usage.get(key), int | float) and usage[key] > 0
+        for key in ("input_tokens", "output_tokens", "total_tokens")
+    )
+
+
+def _extract_token_usage(msg: BaseMessage) -> dict:
+    """Return normalized token usage from common LangChain/OpenAI fields."""
+    candidates = []
+
+    usage = getattr(msg, "usage_metadata", None)
+    if usage:
+        candidates.append(_normalize_token_usage(usage))
+
+    metadata = getattr(msg, "response_metadata", {}) or {}
+    for key in ("token_usage", "usage"):
+        token_usage = metadata.get(key)
+        if token_usage:
+            candidates.append(_normalize_token_usage(token_usage))
+
+    additional_kwargs = getattr(msg, "additional_kwargs", {}) or {}
+    for key in ("token_usage", "usage"):
+        token_usage = additional_kwargs.get(key)
+        if token_usage:
+            candidates.append(_normalize_token_usage(token_usage))
+
+    for candidate in candidates:
+        if _has_positive_tokens(candidate):
+            return candidate
+
+    return {}
+
+
+def _message_text_for_estimate(msg: BaseMessage) -> str:
+    parts: list[str] = [msg.type]
+    content = msg.content
+    if isinstance(content, str):
+        if not _looks_like_base64(content):
+            parts.append(content)
+    elif isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "text":
+                parts.append(str(item.get("text", "")))
+            elif item.get("type") == "image_url":
+                parts.append("[image]")
+
+    tool_calls = getattr(msg, "tool_calls", None)
+    if tool_calls:
+        parts.append(json.dumps(tool_calls, ensure_ascii=False, default=str))
+
+    if isinstance(msg, ToolMessage) and getattr(msg, "name", None):
+        parts.append(str(getattr(msg, "name", "")))
+
+    return "\n".join(part for part in parts if part)
+
+
+def _count_text_tokens(text: str) -> int:
+    global _TOKEN_ENCODER
+    if not text:
+        return 0
+    try:
+        if _TOKEN_ENCODER is None:
+            import tiktoken
+
+            _TOKEN_ENCODER = tiktoken.get_encoding("cl100k_base")
+        return len(_TOKEN_ENCODER.encode(text))
+    except Exception:
+        # Rough fallback for mixed Chinese/English when tiktoken is unavailable.
+        return max(1, len(text) // 4)
+
+
+def _estimate_token_usage(context: list[BaseMessage], response: BaseMessage) -> dict:
+    input_text = "\n\n".join(_message_text_for_estimate(msg) for msg in context)
+    output_text = _message_text_for_estimate(response)
+    input_tokens = _count_text_tokens(input_text)
+    output_tokens = _count_text_tokens(output_text)
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "estimated": True,
+        "note": "local text estimate; image token cost is not included",
+    }
+
+
+def _resolve_usage(context: list[BaseMessage], response: BaseMessage) -> dict:
+    usage = _extract_token_usage(response)
+    if _has_any_tokens(usage):
+        return usage
+    return _estimate_token_usage(context, response)
+
+
 # ── LLMLogger ─────────────────────────────────────────────────────────────────
 
 class LLMLogger:
@@ -159,15 +279,36 @@ class LLMLogger:
         response: BaseMessage,
         thread_id: str = "",
         node: str = "",
+        duration_s: float | None = None,
+        provider: str = "",
+        model: str = "",
     ) -> None:
         """Log one LLM call. Call this right after llm.invoke()."""
         self._call_index += 1
         ts = datetime.now()
 
-        self._print_to_terminal(context, response, thread_id, ts, node=node)
+        self._print_to_terminal(
+            context,
+            response,
+            thread_id,
+            ts,
+            node=node,
+            duration_s=duration_s,
+            provider=provider,
+            model=model,
+        )
 
         if self._log_file is not None:
-            self._append_jsonl(context, response, thread_id, ts)
+            self._append_jsonl(
+                context,
+                response,
+                thread_id,
+                ts,
+                node=node,
+                duration_s=duration_s,
+                provider=provider,
+                model=model,
+            )
 
     # ── Terminal output ────────────────────────────────────────────────────
 
@@ -178,6 +319,9 @@ class LLMLogger:
         thread_id: str,
         ts: datetime,
         node: str = "",
+        duration_s: float | None = None,
+        provider: str = "",
+        model: str = "",
     ) -> None:
         idx = self._call_index
         ts_str = ts.strftime("%H:%M:%S")
@@ -190,6 +334,8 @@ class LLMLogger:
 
         _console.print()
         _console.print(Rule(f"[bold cyan]{header}[/]", style="cyan"))
+        if provider or model:
+            _console.print(f"[dim]provider={escape(provider or '?')}  model={escape(model or '?')}[/]")
 
         # ── Input ──
         _console.print(f"[bold yellow]▶ INPUT[/] ({len(context)} messages)")
@@ -247,14 +393,21 @@ class LLMLogger:
         if not resp_content and not tool_calls:
             _console.print("  (no content, no tool calls)")
 
-        usage = getattr(response, "response_metadata", {}).get("token_usage")
+        usage = _resolve_usage(context, response)
         if usage:
-            prompt = usage.get("prompt_tokens", "?")
-            completion = usage.get("completion_tokens", "?")
+            prompt = usage.get("input_tokens", "?")
+            completion = usage.get("output_tokens", "?")
+            total = usage.get("total_tokens", "?")
+            suffix = " estimated" if usage.get("estimated") else ""
             _console.print(
-                f"  [dim]tokens: {prompt} in / {completion} out[/]",
+                f"  [dim]tokens{suffix}: {prompt} in / {completion} out / {total} total[/]",
                 end="\n",
             )
+        else:
+            _console.print("  [dim]tokens: unavailable[/]")
+
+        if duration_s is not None:
+            _console.print(f"  [dim]latency: {duration_s:.2f}s[/]")
 
         # RAW OUTPUT disabled
 
@@ -266,11 +419,20 @@ class LLMLogger:
         response: BaseMessage,
         thread_id: str,
         ts: datetime,
+        node: str = "",
+        duration_s: float | None = None,
+        provider: str = "",
+        model: str = "",
     ) -> None:
         record = {
             "index": self._call_index,
             "timestamp": ts.isoformat(),
             "thread_id": thread_id,
+            "node": node,
+            "provider": provider,
+            "model": model,
+            "duration_s": duration_s,
+            "usage": _resolve_usage(context, response),
             "input": [_msg_to_dict(m) for m in context],
             "output": _msg_to_dict(response),
         }

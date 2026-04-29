@@ -120,8 +120,18 @@ def plan_node(state: State, config=None) -> dict:
         })
 
     context = [_plan_system, HumanMessage(content=user_content)]
+    start = time.perf_counter()
     response = _plan_llm.invoke(context)
-    _llm_logger.log(context, response, thread_id=thread_id, node="plan")
+    duration_s = time.perf_counter() - start
+    _llm_logger.log(
+        context,
+        response,
+        thread_id=thread_id,
+        node="plan",
+        duration_s=duration_s,
+        provider=_cfg.provider,
+        model=_cfg.model,
+    )
     plan_text = response.content if isinstance(response.content, str) else str(response.content)
 
     plan_steps = re.findall(r"^\d+[.、]\s*(.+)$", plan_text, re.MULTILINE)
@@ -158,8 +168,18 @@ def agent_node(state: State, config=None) -> dict:
     elif state.get("plan"):
         context[0] = SystemMessage(content=context[0].content + f"\n\n[本次任务执行计划]\n{state['plan']}")
 
+    start = time.perf_counter()
     response = _llm.invoke(context)
-    _llm_logger.log(context, response, thread_id=thread_id, node="execute")
+    duration_s = time.perf_counter() - start
+    _llm_logger.log(
+        context,
+        response,
+        thread_id=thread_id,
+        node="execute",
+        duration_s=duration_s,
+        provider=_cfg.provider,
+        model=_cfg.model,
+    )
     update = {"messages": [response]}
     if screenshot_b64:
         update["latest_screenshot"] = screenshot_b64
@@ -242,8 +262,18 @@ def check_node(state: State, config=None) -> dict:
         })
 
     context = [_check_system, HumanMessage(content=check_content)]
+    start = time.perf_counter()
     response = _plan_llm.invoke(context)
-    _llm_logger.log(context, response, thread_id=thread_id, node="check")
+    duration_s = time.perf_counter() - start
+    _llm_logger.log(
+        context,
+        response,
+        thread_id=thread_id,
+        node="check",
+        duration_s=duration_s,
+        provider=_cfg.provider,
+        model=_cfg.model,
+    )
 
     answer = (response.content or "").strip().upper()
     step_done = answer.startswith("YES")
