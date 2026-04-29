@@ -27,11 +27,11 @@ def take_screenshot(config: RunnableConfig) -> str:
 
 @tool
 def tap_screen(x: float, y: float, config: RunnableConfig) -> str:
-    """Tap a position on the iPhone screen.
+    """Tap a single center point on the iPhone screen.
 
     Args:
-        x: Normalized x coordinate (0-1000, left=0, right=1000)
-        y: Normalized y coordinate (0-1000, top=0, bottom=1000)
+        x: A single normalized x coordinate number (0-1000, left=0, right=1000). Do not pass a list or range.
+        y: A single normalized y coordinate number (0-1000, top=0, bottom=1000). Do not pass a list or range.
     """
     session_id = config["configurable"]["thread_id"]
     client = get_client(session_id)
@@ -72,4 +72,4 @@ def type_text(text: str) -> str:
     return f"Typed: {text!r}"
 
 
-TOOLS = [take_screenshot, tap_screen, go_to_home_screen, type_text]
+TOOLS = [tap_screen, go_to_home_screen, type_text]
