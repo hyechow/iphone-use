@@ -158,12 +158,13 @@ class LLMLogger:
         context: list[BaseMessage],
         response: BaseMessage,
         thread_id: str = "",
+        node: str = "",
     ) -> None:
         """Log one LLM call. Call this right after llm.invoke()."""
         self._call_index += 1
         ts = datetime.now()
 
-        self._print_to_terminal(context, response, thread_id, ts)
+        self._print_to_terminal(context, response, thread_id, ts, node=node)
 
         if self._log_file is not None:
             self._append_jsonl(context, response, thread_id, ts)
@@ -176,10 +177,13 @@ class LLMLogger:
         response: BaseMessage,
         thread_id: str,
         ts: datetime,
+        node: str = "",
     ) -> None:
         idx = self._call_index
         ts_str = ts.strftime("%H:%M:%S")
         header = f"LLM Call #{idx}"
+        if node:
+            header += f"  {escape(f'[{node}]')}"
         if thread_id:
             header += f"  thread={thread_id}"
         header += f"  {ts_str}"
@@ -198,13 +202,34 @@ class LLMLogger:
             }.get(msg.type, "white")
 
             role_label = f"[{role_style}]{msg.type:8}[/]"
-            summary = _summarise_content(msg.content)
+            content = msg.content
 
-            # Tool name suffix
             if isinstance(msg, ToolMessage) and getattr(msg, "name", None):
-                _console.print(f"  [{i}] {role_label} [bold]{msg.name}[/] → {escape(summary)}")
+                _console.print(f"  [{i}] {role_label} [bold]{msg.name}[/]")
             else:
-                _console.print(f"  [{i}] {role_label} {escape(summary)}")
+                _console.print(f"  [{i}] {role_label}")
+
+            # Print full content
+            if isinstance(content, str):
+                if _looks_like_base64(content):
+                    kb = len(content) * 3 // 4 // 1024
+                    _console.print(f"       [dim]screenshot ~{kb}kb[/]")
+                else:
+                    _console.print(f"       {escape(content)}")
+            elif isinstance(content, list):
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("type") == "text":
+                        _console.print(f"       {escape(item['text'])}")
+                    elif item.get("type") == "image_url":
+                        url = item.get("image_url", {}).get("url", "")
+                        if url.startswith("data:image"):
+                            data_part = url.split(",", 1)[-1] if "," in url else url
+                            kb = len(data_part) * 3 // 4 // 1024
+                            _console.print(f"       [dim]screenshot ~{kb}kb[/]")
+                        else:
+                            _console.print(f"       [dim]image_url: {escape(url[:80])}[/]")
 
         # ── Output ──
         _console.print(f"[bold yellow]◀ OUTPUT[/]")
@@ -231,10 +256,7 @@ class LLMLogger:
                 end="\n",
             )
 
-        _console.print(f"[bold yellow]◀ RAW OUTPUT[/]")
-        _console.print_json(
-            json.dumps(_raw_msg_to_dict(response), ensure_ascii=False, default=str)
-        )
+        # RAW OUTPUT disabled
 
     # ── JSONL output ───────────────────────────────────────────────────────
 

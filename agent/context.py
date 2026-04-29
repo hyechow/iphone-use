@@ -57,34 +57,14 @@ class ContextBuilder:
 
     @staticmethod
     def _attach_current_screenshot(messages: list[BaseMessage], screenshot_b64: str) -> list[BaseMessage]:
-        """Attach the current screenshot to the latest human message."""
-        image_item = {
-            "type": "image_url",
-            "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
-        }
-
-        result = list(messages)
-        for index in range(len(result) - 1, -1, -1):
-            msg = result[index]
-            if not isinstance(msg, HumanMessage):
-                continue
-
-            if isinstance(msg.content, list):
-                content = [*msg.content, {"type": "text", "text": "[当前屏幕截图]"}, image_item]
-            else:
-                content = [
-                    {"type": "text", "text": str(msg.content)},
-                    {"type": "text", "text": "[当前屏幕截图]"},
-                    image_item,
-                ]
-            result[index] = HumanMessage(content=content)
-            return result
-
-        result.append(HumanMessage(content=[
+        """Append the current screenshot as a standalone HumanMessage at the end of context."""
+        return [*messages, HumanMessage(content=[
             {"type": "text", "text": "[当前屏幕截图]"},
-            image_item,
-        ]))
-        return result
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
+            },
+        ])]
 
     @staticmethod
     def _filter_tap_screen(messages: list[BaseMessage]) -> list[BaseMessage]:

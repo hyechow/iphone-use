@@ -53,6 +53,6 @@ def _normalize_tap_args(args: dict[str, Any]) -> dict[str, Any]:
 def normalize_tool_args(name: str, args: dict[str, Any] | None) -> dict[str, Any]:
     """Return normalized args for known tools."""
     normalized = dict(args or {})
-    if name == "tap_screen":
+    if name in ("tap_screen", "tap_and_type"):
         normalized = _normalize_tap_args(normalized)
     return normalized

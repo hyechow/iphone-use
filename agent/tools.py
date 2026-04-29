@@ -72,4 +72,31 @@ def type_text(text: str) -> str:
     return f"Typed: {text!r}"
 
 
-TOOLS = [tap_screen, go_to_home_screen, type_text]
+@tool
+def tap_and_type(x: float, y: float, text: str, config: RunnableConfig) -> str:
+    """Tap an input field and immediately type text into it.
+
+    Use this instead of calling tap_screen + type_text separately whenever
+    the goal is to enter text into a field (search bar, chat box, etc.).
+
+    Args:
+        x: Normalized x coordinate of the input field center (0-1000).
+        y: Normalized y coordinate of the input field center (0-1000).
+        text: The text to type after tapping.
+    """
+    session_id = config["configurable"]["thread_id"]
+    client = get_client(session_id)
+    lx = x / 1000 * 318
+    ly = y / 1000 * 701
+    client.tap(lx, ly)
+    time.sleep(0.3)  # wait for keyboard to appear
+    subprocess.run(["pbcopy"], input=text.encode(), check=True)
+    time.sleep(0.1)
+    subprocess.run([
+        "osascript", "-e",
+        'tell application "System Events" to keystroke "v" using command down',
+    ], check=True)
+    return f"Tapped ({lx:.0f}, {ly:.0f}) and typed: {text!r}"
+
+
+TOOLS = [tap_screen, go_to_home_screen, type_text, tap_and_type]

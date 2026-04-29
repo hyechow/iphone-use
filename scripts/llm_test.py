@@ -16,8 +16,7 @@ load_dotenv()
 
 
 async def test_vision():
-    # 使用 dashscope provider
-    cfg = resolve_chat_provider_config(provider="modelscope", model="Qwen/Qwen3.5-35B-A3B")
+    cfg = resolve_chat_provider_config()
     print(f"Provider : {cfg.provider}")
     print(f"Model    : {cfg.model}")
     print(f"Base URL : {cfg.base_url}")

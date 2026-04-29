@@ -99,7 +99,7 @@ class State(TypedDict):
     messages: Annotated[list, add_messages]
 
 
-_cfg = resolve_chat_provider_config(provider="modelscope", model="Qwen/Qwen3.5-35B-A3B")
+_cfg = resolve_chat_provider_config()
 _llm = ChatOpenAI(
     model=_cfg.model, api_key=_cfg.api_key, base_url=_cfg.base_url,
 ).bind_tools(MOCK_TOOLS)

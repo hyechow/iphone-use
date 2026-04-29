@@ -31,7 +31,7 @@ load_dotenv()
 SCREENSHOT = Path(__file__).parent.parent / "images" / "screenshot.png"
 OUTPUT = Path(__file__).parent.parent / "images" / "grounding_result.png"
 
-cfg = resolve_chat_provider_config(provider="modelscope", model="Qwen/Qwen3.5-35B-A3B")
+cfg = resolve_chat_provider_config()
 print(f"Provider : {cfg.provider}")
 print(f"Model    : {cfg.model}")
 
