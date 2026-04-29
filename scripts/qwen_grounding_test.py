@@ -38,7 +38,8 @@ print(f"Model    : {cfg.model}")
 SYSTEM_PROMPT = """\
 你是一个 iPhone 操作助手。收到截图后：
 1. 先用一两句话描述当前页面内容（是什么 App、什么界面）。
-2. 然后调用 tap_phone 工具点击目标元素（坐标系：左上角(0,0)，右下角(1000,1000)）。
+2. 输出简短可见依据：目标元素在哪里、为什么选择这个点击点。不要输出隐藏推理链。
+3. 然后调用 tap_phone 工具点击目标元素（坐标系：左上角(0,0)，右下角(1000,1000)）。
 """
 
 TAP_TOOL = {
@@ -80,6 +81,7 @@ def run_grounding(png_bytes: bytes, target: str) -> tuple[str | None, dict | Non
         ],
         tools=[TAP_TOOL],
         tool_choice="auto",
+        extra_body={"enable_thinking": False},
     )
 
     choice = resp.choices[0]
