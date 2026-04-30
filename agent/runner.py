@@ -6,7 +6,7 @@ from langgraph.errors import GraphRecursionError
 
 from agent.agent import _graph
 from agent.events import AgentEvent
-from agent.limits import MAX_REACT_TOOL_ROUNDS, REACT_RECURSION_LIMIT
+from agent.limits import MAX_REACT_ROUNDS, REACT_RECURSION_LIMIT
 from agent.sessions import close_session
 from agent.visualizer import ReActVisualizer
 
@@ -162,7 +162,7 @@ class PhoneAgent:
         except GraphRecursionError:
             yield AgentEvent(
                 type="error",
-                data=f"已达到最大操作轮数（{MAX_REACT_TOOL_ROUNDS} 轮），停止执行",
+                data=f"已达到最大操作轮数（{MAX_REACT_ROUNDS} 轮），停止执行",
             )
         except Exception as e:
             yield AgentEvent(type="error", data=str(e))

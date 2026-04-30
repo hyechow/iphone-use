@@ -13,7 +13,7 @@ from langgraph.prebuilt import ToolNode
 from typing_extensions import NotRequired, TypedDict
 
 from agent.context import ContextBuilder
-from agent.limits import MAX_NO_TOOL_RETRIES, MAX_REACT_TOOL_ROUNDS, POST_TOOL_SCREEN_SETTLE_SECONDS
+from agent.limits import MAX_REACT_ROUNDS, POST_TOOL_SCREEN_SETTLE_SECONDS
 from agent.logger import LLMLogger
 from agent.tool_args import normalize_tool_args
 from agent.tools import TOOLS, take_screenshot
@@ -26,12 +26,13 @@ load_dotenv()
 class State(TypedDict):
     messages: Annotated[list, add_messages]
     latest_screenshot: NotRequired[str]
+    pre_tool_screenshot: NotRequired[str]
     tool_rounds: NotRequired[int]
-    no_tool_retries: NotRequired[int]
     plan: NotRequired[str]
     plan_steps: NotRequired[list[str]]
     current_step: NotRequired[int]
     complete: NotRequired[bool]
+    step_advanced: NotRequired[bool]
 
 
 # ── LLM + context + logger ────────────────────────────────────────────────────
@@ -95,12 +96,31 @@ _plan_system = SystemMessage(content=(
 ))
 
 _check_system = SystemMessage(content=(
-    "你是一个 iPhone 操作验证助手。"
-    "根据当前屏幕截图，判断指定的操作步骤是否已经成功执行。\n"
-    "只回复 YES 或 NO。\n"
-    "YES = 屏幕已明确显示该步骤的执行结果。\n"
-    "NO = 屏幕上看不到该步骤完成的证据。\n"
-    "不要解释，不要回复其他内容。"
+    "你是一个 iPhone 操作验证助手。\n"
+    "你会收到：操作步骤描述、执行前截图、执行后截图。\n\n"
+    "请按以下格式分析，每项单独一行：\n"
+    "屏幕变化：<执行前后屏幕的主要差异>\n"
+    "成功标准：<该步骤完成时屏幕应呈现的状态>\n"
+    "结论：YES 或 NO\n\n"
+    "判断原则：\n"
+    "- YES：屏幕变化与成功标准明确吻合\n"
+    "- NO：屏幕无明显变化、与成功标准不符、或仍处于加载中\n"
+    "- 不确定时判 NO\n"
+    "严格按格式输出，不要添加其他内容。"
+))
+
+_verify_system = SystemMessage(content=(
+    "你是一个 iPhone 操作验证助手。\n"
+    "你会收到：操作步骤描述、当前截图。\n\n"
+    "请按以下格式分析，每项单独一行：\n"
+    "屏幕描述：<当前屏幕显示的主要内容>\n"
+    "成功标准：<该步骤完成时屏幕应呈现的状态>\n"
+    "结论：YES 或 NO\n\n"
+    "判断原则：\n"
+    "- YES：当前屏幕已满足该步骤的完成条件，无需再次执行\n"
+    "- NO：该步骤尚未完成，需要执行操作\n"
+    "- 不确定时判 NO\n"
+    "严格按格式输出，不要添加其他内容。"
 ))
 
 
@@ -163,7 +183,6 @@ def plan_node(state: State, config=None) -> dict:
         "plan_steps": plan_steps,
         "current_step": 0,
         "tool_rounds": 0,
-        "no_tool_retries": 0,
     }
     if screenshot_b64:
         update["latest_screenshot"] = screenshot_b64
@@ -223,28 +242,16 @@ def _patch_tool_call_args(state: State) -> State:
 
 
 def tools_node(state: State, config=None) -> dict:
+    thread_id = (config or {}).get("configurable", {}).get("thread_id", "")
+    pre_screenshot = _take_context_screenshot(thread_id) if thread_id else state.get("latest_screenshot")
     state = _patch_tool_call_args(state)
     update = _tool_node.invoke(state, config=config)
     update["tool_rounds"] = state.get("tool_rounds", 0) + 1
-    update["no_tool_retries"] = 0
+    if pre_screenshot:
+        update["pre_tool_screenshot"] = pre_screenshot
     time.sleep(POST_TOOL_SCREEN_SETTLE_SECONDS)
     return update
 
-
-def force_tool_node(state: State) -> dict:
-    """Nudge the model to call a tool when the current plan step still needs action."""
-    plan_steps = state.get("plan_steps", [])
-    current_step = state.get("current_step", 0)
-    step_text = plan_steps[current_step] if current_step < len(plan_steps) else "当前步骤"
-    retry = state.get("no_tool_retries", 0) + 1
-    return {
-        "messages": [HumanMessage(content=(
-            "上一次回复没有调用工具，但当前任务尚未完成。"
-            f"请执行当前步骤：{step_text}。"
-            "你必须立即调用一个合适的工具，不要只输出文字。"
-        ))],
-        "no_tool_retries": retry,
-    }
 
 
 def check_node(state: State, config=None) -> dict:
@@ -272,11 +279,18 @@ def check_node(state: State, config=None) -> dict:
 
     # Focus only on the current step
     step_text = plan_steps[current_step] if current_step < len(plan_steps) else ""
+    pre_screenshot = state.get("pre_tool_screenshot")
     check_content: list = [{"type": "text", "text": (
         f"任务：{user_text}\n"
-        f"当前步骤（第{current_step + 1}步）：{step_text}\n\n"
-        "请根据当前屏幕截图，判断该步骤是否已成功执行。"
+        f"当前步骤（第{current_step + 1}步）：{step_text}\n"
     )}]
+    if pre_screenshot:
+        check_content.append({"type": "text", "text": "【执行前截图】"})
+        check_content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{pre_screenshot}"},
+        })
+        check_content.append({"type": "text", "text": "【执行后截图】"})
     if screenshot_b64:
         check_content.append({
             "type": "image_url",
@@ -297,8 +311,13 @@ def check_node(state: State, config=None) -> dict:
         model=_check_cfg.model,
     )
 
-    answer = (response.content or "").strip().upper()
-    step_done = answer.startswith("YES")
+    lines = [l.strip() for l in (response.content or "").strip().splitlines() if l.strip()]
+    step_done = False
+    for line in reversed(lines):
+        upper = line.upper()
+        if "YES" in upper or "NO" in upper:
+            step_done = "YES" in upper
+            break
 
     new_step = min(current_step + 1, len(plan_steps)) if step_done else current_step
     complete = step_done and new_step >= len(plan_steps)
@@ -307,6 +326,87 @@ def check_node(state: State, config=None) -> dict:
     if screenshot_b64:
         update["latest_screenshot"] = screenshot_b64
     return update
+
+
+def verify_node(state: State, config=None) -> dict:
+    """Check if current step is already done when agent didn't call any tool."""
+    thread_id = (config or {}).get("configurable", {}).get("thread_id", "")
+
+    messages = state.get("messages", [])
+    last_human = next((m for m in reversed(messages) if isinstance(m, HumanMessage)), None)
+    user_text = ""
+    if last_human:
+        content = last_human.content
+        if isinstance(content, str):
+            user_text = content
+        elif isinstance(content, list):
+            user_text = " ".join(
+                b["text"] for b in content if isinstance(b, dict) and b.get("type") == "text"
+            )
+
+    plan_steps = state.get("plan_steps", [])
+    current_step = state.get("current_step", 0)
+    step_text = plan_steps[current_step] if current_step < len(plan_steps) else ""
+
+    screenshot_b64 = _take_context_screenshot(thread_id) if thread_id else state.get("latest_screenshot")
+
+    verify_content: list = [{"type": "text", "text": (
+        f"任务：{user_text}\n"
+        f"当前步骤（第{current_step + 1}步）：{step_text}\n"
+    )}]
+    if screenshot_b64:
+        verify_content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
+        })
+
+    context = [_verify_system, HumanMessage(content=verify_content)]
+    start = time.perf_counter()
+    response = _check_llm.invoke(context)
+    duration_s = time.perf_counter() - start
+    _llm_logger.log(
+        context,
+        response,
+        thread_id=thread_id,
+        node="verify",
+        duration_s=duration_s,
+        provider=_check_cfg.provider,
+        model=_check_cfg.model,
+    )
+
+    lines = [l.strip() for l in (response.content or "").strip().splitlines() if l.strip()]
+    step_done = False
+    for line in reversed(lines):
+        upper = line.upper()
+        if "YES" in upper or "NO" in upper:
+            step_done = "YES" in upper
+            break
+
+    new_step = min(current_step + 1, len(plan_steps)) if step_done else current_step
+    complete = step_done and new_step >= len(plan_steps)
+
+    update: dict = {"current_step": new_step, "complete": complete, "step_advanced": step_done}
+    if screenshot_b64:
+        update["latest_screenshot"] = screenshot_b64
+    if not step_done:
+        # Count this no-tool round against the loop budget
+        update["tool_rounds"] = state.get("tool_rounds", 0) + 1
+        update["messages"] = [HumanMessage(content=(
+            f"当前步骤尚未完成，请调用合适的工具来执行：{step_text}"
+        ))]
+    return update
+
+
+def after_verify(state: State) -> str:
+    if state.get("complete", False):
+        return END
+    if state.get("step_advanced", False):
+        return "agent"
+    if state.get("tool_rounds", 0) >= MAX_REACT_ROUNDS:
+        return END
+    if not state.get("plan_steps"):
+        return END
+    return "agent"
 
 
 def after_agent(state: State) -> str:
@@ -323,19 +423,16 @@ def after_agent(state: State) -> str:
         return END
     if not state.get("plan_steps"):
         return END
-    if state.get("tool_rounds", 0) >= MAX_REACT_TOOL_ROUNDS:
+    if state.get("tool_rounds", 0) >= MAX_REACT_ROUNDS:
         return END
-    if state.get("no_tool_retries", 0) >= MAX_NO_TOOL_RETRIES:
-        return END
-    return "force_tool"
+    return "verify"
 
 
 def after_check(state: State) -> str:
     if state.get("complete", False):
         return END
-    if state.get("tool_rounds", 0) >= MAX_REACT_TOOL_ROUNDS:
+    if state.get("tool_rounds", 0) >= MAX_REACT_ROUNDS:
         return END
-    # If no plan steps parsed, fall back to single-round behaviour
     if not state.get("plan_steps"):
         return END
     return "agent"
@@ -351,13 +448,13 @@ def _build_graph():
     builder.add_node("plan", plan_node)
     builder.add_node("agent", agent_node)
     builder.add_node("tools", tools_node)
-    builder.add_node("force_tool", force_tool_node)
+    builder.add_node("verify", verify_node)
     builder.add_node("check", check_node)
     builder.set_entry_point("plan")
-    builder.add_edge("plan", "check")
-    builder.add_conditional_edges("agent", after_agent, {"tools": "tools", "force_tool": "force_tool", END: END})
-    builder.add_edge("force_tool", "agent")
+    builder.add_edge("plan", "agent")
+    builder.add_conditional_edges("agent", after_agent, {"tools": "tools", "verify": "verify", END: END})
     builder.add_edge("tools", "check")
+    builder.add_conditional_edges("verify", after_verify, {"agent": "agent", END: END})
     builder.add_conditional_edges("check", after_check, {"agent": "agent", END: END})
     return builder.compile(checkpointer=_checkpointer)
 
