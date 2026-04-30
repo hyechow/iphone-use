@@ -2,11 +2,14 @@
 
 import time
 
+from agent.utils import paste_text
 from policy_expr.perception import LivePhoneSession
 from policy_expr.schemas import Action, PolicyDecision
 
 WIN_W = 318
 WIN_H = 701
+SCROLL_SWIPE_FROM_Y_FRACTION = 0.56
+SCROLL_SWIPE_TO_Y_FRACTION = 0.11
 
 
 class ActionExecutor:
@@ -33,8 +36,8 @@ class ActionExecutor:
             self._tap(lx, ly, decision)
             time.sleep(0.5)
             print(f"输入文字: {action.text!r}")
-            result = self._client().type_text(action.text)
-            print(f"结果: {result}")
+            paste_text(action.text)
+            print("结果: 已通过剪贴板粘贴输入")
 
         elif (
             action.action_type == "scroll"
@@ -67,21 +70,21 @@ class ActionExecutor:
         print(f"结果: {result}")
 
     def _scroll(self, action: Action) -> None:
-        assert action.x is not None
-        assert action.y is not None
-
-        _, ly = logical_xy(action.x, action.y)
-        offset = min(WIN_H * 0.35, 200)
+        direction = (action.direction or "").strip().lower()
         cx = WIN_W / 2
-        if action.direction == "up":
-            fy = min(ly + offset, WIN_H - 10)
-            ty = max(ly - offset, 10)
-        else:
-            fy = max(ly - offset, 10)
-            ty = min(ly + offset, WIN_H - 10)
 
-        print(f"执行滚动({action.direction}): ({cx:.0f},{fy:.0f}) -> ({cx:.0f},{ty:.0f})")
-        result = self._client().swipe(cx, fy, cx, ty, duration_ms=400)
+        # Match mirroir-mcp's calibration/explorer scroll coordinates. Its
+        # swipe tool posts scroll-wheel events at the midpoint, so the midpoint
+        # must stay in the upper content area rather than near the tab/home bar.
+        if direction in ("up", "向上", "upward"):
+            fy = WIN_H * SCROLL_SWIPE_FROM_Y_FRACTION
+            ty = WIN_H * SCROLL_SWIPE_TO_Y_FRACTION
+        else:
+            fy = WIN_H * SCROLL_SWIPE_TO_Y_FRACTION
+            ty = WIN_H * SCROLL_SWIPE_FROM_Y_FRACTION
+
+        print(f"执行滚动({direction or action.direction}): ({cx:.0f},{fy:.0f}) -> ({cx:.0f},{ty:.0f})")
+        result = self._client().swipe(cx, fy, cx, ty, duration_ms=300)
         print(f"结果: {result}")
 
     def _client(self):

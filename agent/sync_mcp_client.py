@@ -69,7 +69,7 @@ class SyncMCPClient:
         raise RuntimeError(f"No image in screenshot response: {last_result}")
 
     def tap(self, x: float, y: float) -> str:
-        result = self.call_tool("tap", {"x": x, "y": y})
+        result = self.call_tool("tap", {"x": round(x), "y": round(y)})
         return text_content(result)
 
     def type_text(self, text: str) -> str:
@@ -83,17 +83,29 @@ class SyncMCPClient:
         to_x: float,
         to_y: float,
         duration_ms: int = 400,
+        cursor_mode: str | None = None,
     ) -> str:
+        arguments = {
+            "from_x": round(from_x),
+            "from_y": round(from_y),
+            "to_x": round(to_x),
+            "to_y": round(to_y),
+            "duration_ms": duration_ms,
+        }
+        if cursor_mode:
+            arguments["cursor_mode"] = cursor_mode
         result = self.call_tool(
             "swipe",
-            {
-                "from_x": from_x,
-                "from_y": from_y,
-                "to_x": to_x,
-                "to_y": to_y,
-                "duration_ms": duration_ms,
-            },
+            arguments,
         )
+        return text_content(result)
+
+    def list_targets(self) -> str:
+        result = self.call_tool("list_targets")
+        return text_content(result)
+
+    def status(self) -> str:
+        result = self.call_tool("status")
         return text_content(result)
 
     def press_home(self) -> str:
