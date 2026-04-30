@@ -7,8 +7,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from llm.provider_config import resolve_chat_provider_config
-from policy_expr.policies.base import resize_to_logical_png
-from policy_expr.schemas import Observation, PolicyDecision
+from policy_expr.policies.base import BasePolicy, resize_to_logical_png
+from policy_expr.schemas import Observation, PolicyContext, PolicyDecision
 
 load_dotenv()
 
@@ -30,7 +30,7 @@ SYSTEM_PROMPT = """\
 """
 
 
-class StructuredOutputPolicy:
+class StructuredOutputPolicy(BasePolicy):
     """Current baseline policy: LLM vision + structured output."""
 
     name = "structured_output"
@@ -63,3 +63,22 @@ class StructuredOutputPolicy:
             ),
         ]
         return llm.invoke(messages)
+
+    def decide_with_context(
+        self,
+        observation: Observation,
+        context: PolicyContext,
+    ) -> PolicyDecision:
+        if not context.turns:
+            return self.decide(observation, context.goal)
+
+        history = "\n".join(
+            f"{turn.index}. 屏幕：{turn.summary}；动作：[{turn.action.action_type}] {turn.action.description}；执行：{turn.executed}"
+            for turn in context.turns[-6:]
+        )
+        prompt = (
+            f"{context.goal}\n\n"
+            "这是多轮 ReAct 测试的后续轮次。请结合历史记录，只输出当前这一轮最应该执行的一个动作。\n"
+            f"历史记录：\n{history}"
+        )
+        return self.decide(observation, prompt)

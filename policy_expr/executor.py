@@ -96,4 +96,10 @@ class ActionExecutor:
 def logical_xy(ax: float, ay: float) -> tuple[float, float]:
     """Convert normalized coordinates to iPhone Mirroring logical pixels."""
 
-    return ax / 1000 * WIN_W, ay / 1000 * WIN_H
+    x = ax / 1000 * WIN_W
+    y = ay / 1000 * WIN_H
+    return clamp(x, 0, WIN_W - 1), clamp(y, 0, WIN_H - 1)
+
+
+def clamp(value: float, low: float, high: float) -> float:
+    return min(max(value, low), high)
