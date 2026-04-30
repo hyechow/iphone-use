@@ -266,12 +266,15 @@ class LLMLogger:
 
     def __init__(self, log_dir: str | Path | None = None):
         self._call_index = 0
+        self._logical_index = 0
         self._log_file: Path | None = None
+        self._logical_log_file: Path | None = None
 
         if log_dir is not None:
             log_dir = Path(log_dir)
             log_dir.mkdir(parents=True, exist_ok=True)
             self._log_file = log_dir / "llm_calls.jsonl"
+            self._logical_log_file = log_dir / "logical_calls.jsonl"
 
     def log(
         self,
@@ -309,6 +312,52 @@ class LLMLogger:
                 provider=provider,
                 model=model,
             )
+
+    def log_logical(
+        self,
+        *,
+        thread_id: str = "",
+        node: str = "logical",
+        content: str = "",
+        decision: str = "",
+        reason: str = "",
+        tool_call: dict | None = None,
+    ) -> None:
+        """Log one deterministic logical decision."""
+        self._logical_index += 1
+        ts = datetime.now()
+        ts_str = ts.strftime("%H:%M:%S")
+        header = f"Logical Call #{self._logical_index}  [{node}]"
+        if thread_id:
+            header += f"  thread={thread_id}"
+        header += f"  {ts_str}"
+
+        _console.print()
+        _console.print(Rule(f"[bold cyan]{header}[/]", style="cyan"))
+        _console.print("[bold yellow]▶ INPUT[/]")
+        _console.print(f"  content  {escape(content or '(empty)')}")
+        _console.print("[bold yellow]◀ OUTPUT[/]")
+        _console.print(f"  decision {escape(decision or '(none)')}")
+        if reason:
+            _console.print(f"  reason   {escape(reason)}")
+        if tool_call:
+            name = tool_call.get("name", "unknown")
+            args = json.dumps(tool_call.get("args", {}), ensure_ascii=False)
+            _console.print(f"  [cyan]→ {escape(name)}[/]({escape(args)})")
+
+        if self._logical_log_file is not None:
+            record = {
+                "index": self._logical_index,
+                "timestamp": ts.isoformat(),
+                "thread_id": thread_id,
+                "node": node,
+                "content": content,
+                "decision": decision,
+                "reason": reason,
+                "tool_call": tool_call,
+            }
+            with self._logical_log_file.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
     # ── Terminal output ────────────────────────────────────────────────────
 

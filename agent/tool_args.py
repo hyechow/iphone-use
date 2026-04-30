@@ -38,6 +38,9 @@ def _normalize_tap_args(args: dict[str, Any]) -> dict[str, Any]:
     if isinstance(x, list) and len(x) == 2 and y is None:
         return {**args, "x": coerce_number(x[0]), "y": coerce_number(x[1])}
 
+    if x is None or y is None:
+        return args
+
     # Model passed x as [a, b] and y as [c]. Take x[0] as x and y[0] as y.
     if (
         isinstance(x, list)

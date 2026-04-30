@@ -3,6 +3,7 @@
 import base64
 import json
 import subprocess
+import time
 
 
 class SyncMCPClient:
@@ -43,15 +44,20 @@ class SyncMCPClient:
         return json.loads(line)
 
     def screenshot(self) -> bytes:
-        self._send({
-            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "screenshot", "arguments": {}},
-        })
-        result = self._recv()
-        for item in result.get("result", {}).get("content", []):
-            if item.get("type") == "image" and item.get("data"):
-                return base64.b64decode(item["data"])
-        raise RuntimeError("No image in screenshot response")
+        last_result = None
+        for attempt in range(3):
+            self._send({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "screenshot", "arguments": {}},
+            })
+            result = self._recv()
+            last_result = result
+            for item in result.get("result", {}).get("content", []):
+                if item.get("type") == "image" and item.get("data"):
+                    return base64.b64decode(item["data"])
+            if attempt < 2:
+                time.sleep(0.4)
+        raise RuntimeError(f"No image in screenshot response: {last_result}")
 
     def tap(self, x: float, y: float) -> str:
         self._send({

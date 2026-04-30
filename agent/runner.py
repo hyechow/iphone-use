@@ -56,6 +56,7 @@ class PhoneAgent:
             latest_screenshot_b64: str | None = None
             pending_actions: dict[str, dict] = {}
             pending_action_ids: list[str] = []
+            final_result: str | None = None
 
             for item in _graph.stream(input_state, config, stream_mode=["messages", "updates"], version="v2"):
                 mode = item["type"]
@@ -97,7 +98,7 @@ class PhoneAgent:
 
                 elif mode == "updates":
                     for node_name, update in data.items():
-                        if node_name == "agent":
+                        if node_name in ("agent", "recover", "verify"):
                             b64 = update.get("latest_screenshot")
                             if isinstance(b64, str) and len(b64) > 100:
                                 latest_screenshot_b64 = b64
@@ -153,11 +154,20 @@ class PhoneAgent:
                                         latest_screenshot_b64 = b64
                                         visualizer.update_screenshot(b64)
                                         yield AgentEvent(type="screenshot", data=b64)
+                        elif node_name == "output":
+                            result = update.get("final_result")
+                            if isinstance(result, str) and result.strip():
+                                final_result = result.strip()
+                            b64 = update.get("latest_screenshot")
+                            if isinstance(b64, str) and len(b64) > 100:
+                                latest_screenshot_b64 = b64
+                                visualizer.update_screenshot(b64)
+                                yield AgentEvent(type="screenshot", data=b64)
 
             if in_think and think_buf.strip():
                 yield AgentEvent(type="reasoning", data=think_buf)
 
-            yield AgentEvent(type="done", data="完成")
+            yield AgentEvent(type="done", data=final_result or "完成")
 
         except GraphRecursionError:
             yield AgentEvent(

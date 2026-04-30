@@ -11,6 +11,15 @@ from agent.sessions import get_client
 from agent.utils import home_indicator_coords
 
 
+def _require_coordinate(name: str, value: float | int | None) -> float:
+    if value is None:
+        raise ValueError(f"{name} is required for this tool call")
+    number = float(value)
+    if not 0 <= number <= 1000:
+        raise ValueError(f"{name} must be between 0 and 1000")
+    return number
+
+
 def _paste_text(text: str) -> None:
     subprocess.run(["pbcopy"], input=text.encode(), check=True)
     time.sleep(0.1)
@@ -52,6 +61,8 @@ def tap_screen(x: float, y: float, config: RunnableConfig) -> str:
     """
     session_id = config["configurable"]["thread_id"]
     client = get_client(session_id)
+    x = _require_coordinate("x", x)
+    y = _require_coordinate("y", y)
     # Convert normalized 0-1000 → logical pixels (window is 318×701)
     lx = x / 1000 * 318
     ly = y / 1000 * 701
@@ -105,6 +116,8 @@ def tap_and_type(x: float, y: float, text: str, config: RunnableConfig, press_en
     """
     session_id = config["configurable"]["thread_id"]
     client = get_client(session_id)
+    x = _require_coordinate("x", x)
+    y = _require_coordinate("y", y)
     lx = x / 1000 * 318
     ly = y / 1000 * 701
     client.tap(lx, ly)

@@ -1,4 +1,5 @@
 import base64
+import asyncio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
@@ -19,11 +20,16 @@ class MCPClient:
 
     async def screenshot(self) -> bytes:
         assert self._session, "Not connected"
-        result = await self._session.call_tool("screenshot", {})
-        for item in result.content:
-            if item.type == "image" and hasattr(item, "data"):
-                return base64.b64decode(item.data)
-        raise RuntimeError("No image in screenshot response")
+        last_content = None
+        for attempt in range(3):
+            result = await self._session.call_tool("screenshot", {})
+            last_content = result.content
+            for item in result.content:
+                if item.type == "image" and hasattr(item, "data"):
+                    return base64.b64decode(item.data)
+            if attempt < 2:
+                await asyncio.sleep(0.4)
+        raise RuntimeError(f"No image in screenshot response: {last_content}")
 
     async def tap(self, x: float, y: float) -> str:
         assert self._session, "Not connected"
