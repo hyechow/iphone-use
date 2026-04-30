@@ -9,6 +9,7 @@ import time
 class SyncMCPClient:
     def __init__(self):
         self._proc: subprocess.Popen | None = None
+        self._request_id = 0
 
     def connect(self):
         self._proc = subprocess.Popen(
@@ -43,14 +44,22 @@ class SyncMCPClient:
             raise ConnectionError("MCP server closed connection")
         return json.loads(line)
 
+    def call_tool(self, name: str, arguments: dict | None = None) -> dict:
+        """Call a mirroir-mcp tool and return the raw JSON-RPC result."""
+
+        self._request_id += 1
+        self._send({
+            "jsonrpc": "2.0",
+            "id": self._request_id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments or {}},
+        })
+        return self._recv()
+
     def screenshot(self) -> bytes:
         last_result = None
         for attempt in range(3):
-            self._send({
-                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                "params": {"name": "screenshot", "arguments": {}},
-            })
-            result = self._recv()
+            result = self.call_tool("screenshot")
             last_result = result
             for item in result.get("result", {}).get("content", []):
                 if item.get("type") == "image" and item.get("data"):
@@ -60,17 +69,51 @@ class SyncMCPClient:
         raise RuntimeError(f"No image in screenshot response: {last_result}")
 
     def tap(self, x: float, y: float) -> str:
-        self._send({
-            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "tap", "arguments": {"x": x, "y": y}},
-        })
-        result = self._recv()
-        for item in result.get("result", {}).get("content", []):
-            if item.get("type") == "text":
-                return item["text"]
-        return ""
+        result = self.call_tool("tap", {"x": x, "y": y})
+        return text_content(result)
+
+    def type_text(self, text: str) -> str:
+        result = self.call_tool("type_text", {"text": text})
+        return text_content(result)
+
+    def swipe(
+        self,
+        from_x: float,
+        from_y: float,
+        to_x: float,
+        to_y: float,
+        duration_ms: int = 400,
+    ) -> str:
+        result = self.call_tool(
+            "swipe",
+            {
+                "from_x": from_x,
+                "from_y": from_y,
+                "to_x": to_x,
+                "to_y": to_y,
+                "duration_ms": duration_ms,
+            },
+        )
+        return text_content(result)
+
+    def press_home(self) -> str:
+        result = self.call_tool("press_home")
+        return text_content(result)
 
     def close(self):
         if self._proc:
             self._proc.terminate()
             self._proc = None
+
+
+def text_content(result: dict) -> str:
+    """Extract plain text content from an MCP tools/call response."""
+
+    if "error" in result:
+        return str(result["error"])
+
+    parts = []
+    for item in result.get("result", {}).get("content", []):
+        if item.get("type") == "text":
+            parts.append(item["text"])
+    return "\n".join(parts)
