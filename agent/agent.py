@@ -1,3 +1,4 @@
+import os
 import re
 import time
 from typing import Annotated
@@ -35,18 +36,38 @@ class State(TypedDict):
 
 # ── LLM + context + logger ────────────────────────────────────────────────────
 
-_cfg = resolve_chat_provider_config()
+def _resolve_node_config(prefix: str):
+    """Resolve per-node LLM config with global provider settings as fallback."""
+    return resolve_chat_provider_config(
+        provider=os.getenv(f"{prefix}_API_PROVIDER"),
+        model=os.getenv(f"{prefix}_MODEL"),
+        api_key=os.getenv(f"{prefix}_API_KEY"),
+        base_url=os.getenv(f"{prefix}_BASE_URL"),
+    )
+
+
+_execute_cfg = _resolve_node_config("EXECUTE")
+_plan_cfg = _resolve_node_config("PLAN")
+_check_cfg = _resolve_node_config("CHECK")
+
 _llm = ChatOpenAI(
-    model=_cfg.model,
-    api_key=_cfg.api_key,
-    base_url=_cfg.base_url,
+    model=_execute_cfg.model,
+    api_key=_execute_cfg.api_key,
+    base_url=_execute_cfg.base_url,
     extra_body={"enable_thinking": False},
 ).bind_tools(TOOLS, strict=True, parallel_tool_calls=False)
 
 _plan_llm = ChatOpenAI(
-    model=_cfg.model,
-    api_key=_cfg.api_key,
-    base_url=_cfg.base_url,
+    model=_plan_cfg.model,
+    api_key=_plan_cfg.api_key,
+    base_url=_plan_cfg.base_url,
+    extra_body={"enable_thinking": False},
+)
+
+_check_llm = ChatOpenAI(
+    model=_check_cfg.model,
+    api_key=_check_cfg.api_key,
+    base_url=_check_cfg.base_url,
     extra_body={"enable_thinking": False},
 )
 
@@ -60,6 +81,7 @@ _system = SystemMessage(content=(
     "只有当任务已经完成、无需任何手机操作时，才可以不调用工具。"
     "如果当前屏幕已经满足用户请求或当前计划步骤，必须直接回复完成，不要调用任何工具。"
     "不要把 go_to_home_screen 当作完成任务后的收尾动作；只有用户要求回到主页或必须先回主页才能继续时才调用它。"
+    "输入文字时优先使用 tap_and_type；当前输入工具默认会在输入后按一次回车来提交。"
     "坐标系：左上角(0,0)，右下角(1000,1000)。"
     "调用 tap_screen 时，x 和 y 必须是单个数字，表示点击点中心；"
     "不要输出数组、范围、边界框或多个候选坐标。"
@@ -129,8 +151,8 @@ def plan_node(state: State, config=None) -> dict:
         thread_id=thread_id,
         node="plan",
         duration_s=duration_s,
-        provider=_cfg.provider,
-        model=_cfg.model,
+        provider=_plan_cfg.provider,
+        model=_plan_cfg.model,
     )
     plan_text = response.content if isinstance(response.content, str) else str(response.content)
 
@@ -177,8 +199,8 @@ def agent_node(state: State, config=None) -> dict:
         thread_id=thread_id,
         node="execute",
         duration_s=duration_s,
-        provider=_cfg.provider,
-        model=_cfg.model,
+        provider=_execute_cfg.provider,
+        model=_execute_cfg.model,
     )
     update = {"messages": [response]}
     if screenshot_b64:
@@ -263,7 +285,7 @@ def check_node(state: State, config=None) -> dict:
 
     context = [_check_system, HumanMessage(content=check_content)]
     start = time.perf_counter()
-    response = _plan_llm.invoke(context)
+    response = _check_llm.invoke(context)
     duration_s = time.perf_counter() - start
     _llm_logger.log(
         context,
@@ -271,8 +293,8 @@ def check_node(state: State, config=None) -> dict:
         thread_id=thread_id,
         node="check",
         duration_s=duration_s,
-        provider=_cfg.provider,
-        model=_cfg.model,
+        provider=_check_cfg.provider,
+        model=_check_cfg.model,
     )
 
     answer = (response.content or "").strip().upper()
@@ -289,8 +311,14 @@ def check_node(state: State, config=None) -> dict:
 
 def after_agent(state: State) -> str:
     messages = state.get("messages", [])
-    if messages and isinstance(messages[-1], AIMessage) and messages[-1].tool_calls:
-        return "tools"
+    if messages and isinstance(messages[-1], AIMessage):
+        last = messages[-1]
+        content = last.content if isinstance(last.content, str) else ""
+        done_markers = ("任务已完成", "已经完成", "无需进一步操作", "无需操作")
+        if last.tool_calls and any(marker in content for marker in done_markers):
+            return END
+        if last.tool_calls:
+            return "tools"
     if state.get("complete", False):
         return END
     if not state.get("plan_steps"):

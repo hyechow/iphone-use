@@ -11,6 +11,23 @@ from agent.sessions import get_client
 from agent.utils import home_indicator_coords
 
 
+def _paste_text(text: str) -> None:
+    subprocess.run(["pbcopy"], input=text.encode(), check=True)
+    time.sleep(0.1)
+    subprocess.run([
+        "osascript", "-e",
+        'tell application "System Events" to keystroke "v" using command down',
+    ], check=True)
+
+
+def _press_enter() -> None:
+    time.sleep(0.1)
+    subprocess.run([
+        "osascript", "-e",
+        'tell application "System Events" to key code 36',
+    ], check=True)
+
+
 @tool
 def take_screenshot(config: RunnableConfig) -> str:
     """Take a screenshot of the current iPhone screen. Returns a base64-encoded PNG image."""
@@ -55,25 +72,25 @@ def go_to_home_screen(config: RunnableConfig) -> str:
 
 
 @tool
-def type_text(text: str) -> str:
+def type_text(text: str, press_enter: bool = True) -> str:
     """Type text into the currently focused input field on the iPhone.
 
     Uses clipboard paste (pbcopy + Cmd+V) to support Chinese and all Unicode.
 
     Args:
         text: The text to type into the input field.
+        press_enter: Press Return after typing. Use this when the input should be submitted
+            immediately, such as search fields or screens without a visible send button.
     """
-    subprocess.run(["pbcopy"], input=text.encode(), check=True)
-    time.sleep(0.1)
-    subprocess.run([
-        "osascript", "-e",
-        'tell application "System Events" to keystroke "v" using command down',
-    ], check=True)
+    _paste_text(text)
+    if press_enter:
+        _press_enter()
+        return f"Typed and pressed Enter: {text!r}"
     return f"Typed: {text!r}"
 
 
 @tool
-def tap_and_type(x: float, y: float, text: str, config: RunnableConfig) -> str:
+def tap_and_type(x: float, y: float, text: str, config: RunnableConfig, press_enter: bool = True) -> str:
     """Tap an input field and immediately type text into it.
 
     Use this instead of calling tap_screen + type_text separately whenever
@@ -83,6 +100,8 @@ def tap_and_type(x: float, y: float, text: str, config: RunnableConfig) -> str:
         x: Normalized x coordinate of the input field center (0-1000).
         y: Normalized y coordinate of the input field center (0-1000).
         text: The text to type after tapping.
+        press_enter: Press Return after typing. Use this when the input should be submitted
+            immediately, such as search fields or screens without a visible send button.
     """
     session_id = config["configurable"]["thread_id"]
     client = get_client(session_id)
@@ -90,12 +109,10 @@ def tap_and_type(x: float, y: float, text: str, config: RunnableConfig) -> str:
     ly = y / 1000 * 701
     client.tap(lx, ly)
     time.sleep(0.3)  # wait for keyboard to appear
-    subprocess.run(["pbcopy"], input=text.encode(), check=True)
-    time.sleep(0.1)
-    subprocess.run([
-        "osascript", "-e",
-        'tell application "System Events" to keystroke "v" using command down',
-    ], check=True)
+    _paste_text(text)
+    if press_enter:
+        _press_enter()
+        return f"Tapped ({lx:.0f}, {ly:.0f}), typed {text!r}, and pressed Enter"
     return f"Tapped ({lx:.0f}, {ly:.0f}) and typed: {text!r}"
 
 

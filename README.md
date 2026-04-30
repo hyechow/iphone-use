@@ -28,6 +28,14 @@ MODELSCOPE_MODEL=Qwen/Qwen3.5-35B-A3B  # 支持视觉输入
 # 其他提供商按需配置
 # NVIDIA_API_KEY=...
 # NVIDIA_MODEL=moonshotai/kimi-k2-instruct
+
+# 可选：为不同节点单独配置 LLM；未设置时回退到上面的全局配置
+# PLAN_API_PROVIDER=modelscope
+# PLAN_MODEL=Qwen/Qwen3.5-35B-A3B
+# EXECUTE_API_PROVIDER=modelscope
+# EXECUTE_MODEL=Qwen/Qwen3.5-35B-A3B
+# CHECK_API_PROVIDER=modelscope
+# CHECK_MODEL=Qwen/Qwen3.5-35B-A3B
 ```
 
 ## 启动服务

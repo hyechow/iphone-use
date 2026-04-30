@@ -7,6 +7,8 @@ from collections.abc import Callable
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
+_CONTEXT_TOOL_NAMES = {"take_screenshot"}
+
 
 class ContextBuilder:
     """Assembles the full context list for each LLM call.
@@ -41,7 +43,7 @@ class ContextBuilder:
         thread_id: str | None = None,
     ) -> tuple[list[BaseMessage], str | None]:
         """Return the full context and any fresh screenshot attached to it."""
-        messages = self._filter_tap_screen(state_messages)
+        messages = self._filter_operation_tools(state_messages)
         messages = self._inject_screenshots(messages)
         screenshot_b64 = self._take_context_screenshot(thread_id)
         if screenshot_b64:
@@ -67,25 +69,28 @@ class ContextBuilder:
         ])]
 
     @staticmethod
-    def _filter_tap_screen(messages: list[BaseMessage]) -> list[BaseMessage]:
-        """Remove tap_screen tool calls and their ToolMessage results from context.
+    def _filter_operation_tools(messages: list[BaseMessage]) -> list[BaseMessage]:
+        """Remove iPhone operation tool calls and tool results from context.
 
-        The LLM doesn't need to see "Tapped at (x, y)" — the next screenshot
-        already shows the result. Keeps any text content in the AIMessage.
+        The next screenshot already shows the result of tap/type/home actions.
+        Screenshot tool results are kept and converted into image messages.
         """
-        tap_ids: set[str] = set()
+        hidden_tool_ids: set[str] = set()
         for msg in messages:
             if isinstance(msg, AIMessage):
                 for tc in msg.tool_calls:
-                    if tc.get("name") == "tap_screen":
-                        tap_ids.add(tc.get("id", ""))
+                    if tc.get("name") not in _CONTEXT_TOOL_NAMES:
+                        hidden_tool_ids.add(tc.get("id", ""))
 
         result = []
         for msg in messages:
-            if isinstance(msg, ToolMessage) and msg.tool_call_id in tap_ids:
+            if isinstance(msg, ToolMessage) and (
+                msg.tool_call_id in hidden_tool_ids
+                or getattr(msg, "name", None) not in _CONTEXT_TOOL_NAMES
+            ):
                 continue
             if isinstance(msg, AIMessage) and msg.tool_calls:
-                remaining = [tc for tc in msg.tool_calls if tc.get("name") != "tap_screen"]
+                remaining = [tc for tc in msg.tool_calls if tc.get("name") in _CONTEXT_TOOL_NAMES]
                 if len(remaining) != len(msg.tool_calls):
                     if not remaining and not msg.content:
                         continue
