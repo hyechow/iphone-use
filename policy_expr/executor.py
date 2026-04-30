@@ -50,6 +50,9 @@ class ActionExecutor:
         elif action.action_type == "home":
             print("执行返回主屏")
             result = self._client().press_home()
+            if "Failed to press Home" in result:
+                print(f"结果: {result}，改为点击底部 Home 指示条")
+                result = self._client().tap(WIN_W / 2, WIN_H - 16)
             print(f"结果: {result}")
 
         else:

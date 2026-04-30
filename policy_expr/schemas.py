@@ -55,6 +55,15 @@ class PolicyDecision(BaseModel):
     action: Action = Field(description="经过推理后，当前最应该执行的一个操作")
 
 
+class TurnValidation(BaseModel):
+    """Validation summary saved with a policy turn."""
+
+    validator_name: str
+    passed: bool
+    summary: str
+    evidence: Optional[str] = None
+
+
 class PolicyTurn(BaseModel):
     """One observe-decide-act turn saved in continue mode."""
 
@@ -67,6 +76,7 @@ class PolicyTurn(BaseModel):
     reasoning: str
     action: Action
     executed: bool
+    validation: Optional[TurnValidation] = None
 
 
 class PolicyContext(BaseModel):

@@ -7,7 +7,13 @@ from typing import Protocol
 
 from PIL import Image
 
-from policy_expr.schemas import Observation, PolicyContext, PolicyDecision, PolicyTurn
+from policy_expr.schemas import (
+    Observation,
+    PolicyContext,
+    PolicyDecision,
+    PolicyTurn,
+    TurnValidation,
+)
 
 
 class Policy(Protocol):
@@ -37,6 +43,7 @@ class Policy(Protocol):
         observation: Observation,
         decision: PolicyDecision,
         executed: bool,
+        validation: TurnValidation | None = None,
     ) -> None:
         """Append one completed observe-decide-act turn to context."""
 
@@ -75,6 +82,7 @@ class BasePolicy:
         observation: Observation,
         decision: PolicyDecision,
         executed: bool,
+        validation: TurnValidation | None = None,
     ) -> None:
         context.turns.append(
             PolicyTurn(
@@ -86,6 +94,7 @@ class BasePolicy:
                 reasoning=decision.reasoning,
                 action=decision.action,
                 executed=executed,
+                validation=validation,
             )
         )
 
