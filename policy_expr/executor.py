@@ -22,7 +22,10 @@ class ActionExecutor:
         action = decision.action
         print(f"\n动作: [{action.action_type}] {action.description}")
 
-        if action.action_type == "tap" and action.x is not None and action.y is not None:
+        if action.action_type == "nop":
+            print("无需操作")
+
+        elif action.action_type == "tap" and action.x is not None and action.y is not None:
             lx, ly = logical_xy(action.x, action.y)
             self._tap(lx, ly, decision)
 

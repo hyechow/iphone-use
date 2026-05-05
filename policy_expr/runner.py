@@ -11,6 +11,7 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from policy_expr.executor import ActionExecutor
+from policy_expr.output import render_final_output
 from policy_expr.perception import LivePerception, LivePhoneSession
 from policy_expr.policies import StructuredOutputPolicy
 from policy_expr.policies.base import Policy
@@ -97,6 +98,22 @@ def validate_turn(
     )
 
 
+def emit_final_output(
+    goal: str,
+    policy_name: str,
+    turns: list[PolicyTurn],
+    log_dir: Path,
+    stop_reason: str,
+) -> str:
+    output = render_final_output(goal, policy_name, turns, log_dir, stop_reason)
+    print("\n" + "=" * 50)
+    print("最终输出")
+    print("=" * 50)
+    print(output.rstrip())
+    print("=" * 50)
+    return output
+
+
 def run_once(
     prompt: str,
     policy: Policy,
@@ -120,6 +137,13 @@ def run_once(
         executed = ActionExecutor(phone).execute(decision)
         if not executed:
             policy.append_turn(context, observation, decision, executed)
+            context.output = emit_final_output(
+                context.goal,
+                context.policy_name,
+                context.turns,
+                log_dir,
+                "动作未执行，运行停止",
+            )
             policy.save_context(context_path, context)
             print(f"Context 已保存: {context_path}")
             return
@@ -133,6 +157,13 @@ def run_once(
         print(f"已保存: {after_path}")
         validation = validate_turn(validator, observation, decision, after_observation, goal=context.goal)
         policy.append_turn(context, observation, decision, executed, validation)
+        context.output = emit_final_output(
+            context.goal,
+            context.policy_name,
+            context.turns,
+            log_dir,
+            "single-step 完成一轮后停止",
+        )
         policy.save_context(context_path, context)
         print(f"Context 已保存: {context_path}")
 
@@ -179,17 +210,44 @@ def run_agent_loop(
                 validation = validate_turn(validator, observation, decision, after_observation, goal=context.goal)
 
             policy.append_turn(context, observation, decision, executed, validation)
-            policy.save_context(context_path, context)
-            print(f"Context 已保存: {context_path}")
             if not executed:
+                context.output = emit_final_output(
+                    context.goal,
+                    context.policy_name,
+                    context.turns,
+                    log_dir,
+                    "动作未执行，agent-loop 停止",
+                )
+                policy.save_context(context_path, context)
+                print(f"Context 已保存: {context_path}")
                 return
 
             if validation and validation.goal_completed:
                 print(f"\n目标已达成：{validation.goal_completed_reason}")
+                context.output = emit_final_output(
+                    context.goal,
+                    context.policy_name,
+                    context.turns,
+                    log_dir,
+                    f"目标已达成：{validation.goal_completed_reason}",
+                )
+                policy.save_context(context_path, context)
+                print(f"Context 已保存: {context_path}")
                 return
 
+            policy.save_context(context_path, context)
+            print(f"Context 已保存: {context_path}")
             answer = input("继续下一轮 ReAct？[Enter继续 / q退出] ").strip().lower()
             if answer in {"q", "quit", "exit"}:
+                context.output = emit_final_output(
+                    context.goal,
+                    context.policy_name,
+                    context.turns,
+                    log_dir,
+                    "用户退出 agent-loop",
+                )
+                policy.save_context(context_path, context)
+                print(f"Context 已保存: {context_path}")
                 return
 
 
@@ -253,9 +311,17 @@ def run_dialog_loop(
 ) -> None:
     _ = policy, validator
     context = load_dialog_context(input_context_path, policy.name) if input_context_path else DialogContext(policy_name=policy.name)
-    save_dialog_context(context_path, context)
     print("TODO: dialog-loop 框架已保留，但单用户多轮自然语言对话模式尚未完整实现。")
     print("当前可使用 single-step --context 测试带历史的一步决策。")
+    context.output = emit_final_output(
+        "未提供",
+        context.policy_name,
+        context.turns,
+        log_dir,
+        "dialog-loop 尚未实现，未执行策略回合",
+    )
+    save_dialog_context(context_path, context)
+    print(f"Context 已保存: {context_path}")
 
 
 def run_single_step_with_context(
@@ -296,6 +362,13 @@ def run_single_step_with_context(
 
         append_dialog_turn(context, observation, decision, executed, validation)
         context.messages.append(DialogMessage(role="assistant", content=f"{decision.summary}；{decision.action.description}"))
+        context.output = emit_final_output(
+            prompt,
+            context.policy_name,
+            context.turns,
+            log_dir,
+            "带上下文 single-step 完成一轮后停止",
+        )
         save_dialog_context(context_path, context)
         print(f"Context 已保存: {context_path}")
 

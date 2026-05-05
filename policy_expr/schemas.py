@@ -7,10 +7,10 @@ from pydantic import BaseModel, Field
 
 
 class Action(BaseModel):
-    """A single executable phone action in normalized coordinates."""
+    """A single phone action in normalized coordinates, or nop when no action is needed."""
 
     action_type: str = Field(
-        description="操作类型：tap（纯点击）、type（点击输入框并输入文字）、scroll（滚动）、home（返回主屏幕）之一"
+        description="操作类型：tap（纯点击）、type（点击输入框并输入文字）、scroll（滚动）、home（返回主屏幕）、nop（无需操作）之一"
     )
     x: Optional[float] = Field(
         default=None,
@@ -87,6 +87,7 @@ class PolicyContext(BaseModel):
     goal: str
     policy_name: str
     turns: list[PolicyTurn] = Field(default_factory=list)
+    output: Optional[str] = None
 
 
 class DialogMessage(BaseModel):
@@ -103,3 +104,4 @@ class DialogContext(BaseModel):
     policy_name: str
     messages: list[DialogMessage] = Field(default_factory=list)
     turns: list[PolicyTurn] = Field(default_factory=list)
+    output: Optional[str] = None
