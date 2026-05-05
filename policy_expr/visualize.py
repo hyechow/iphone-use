@@ -20,8 +20,6 @@ def print_decision(
     action = decision.action
     coords = f"  ({action.x:.0f},{action.y:.0f})" if action.x is not None else ""
     text = f"  文字={action.text!r}" if action.text else ""
-    print(f"\n屏幕  : {decision.summary}")
-    print(f"\n推理  : {decision.reasoning}")
     print("\n" + "=" * 50)
     print(f"[{action.action_type}] {action.description}{coords}{text}")
     print("=" * 50)

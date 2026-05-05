@@ -39,20 +39,9 @@ class Observation(BaseModel):
 
 
 class ActionDecision(BaseModel):
-    """Action policy output: screen interpretation plus the next action."""
+    """Action policy output: the next action to execute."""
 
-    screen_type: str = Field(
-        description="屏幕类型，如 home_screen、app_page、settings、dialog 等"
-    )
-    app_name: Optional[str] = Field(
-        default=None,
-        description="当前前台应用名称，主屏幕时为 null",
-    )
-    summary: str = Field(description="屏幕内容的简要中文描述（1-2句话）")
-    reasoning: str = Field(
-        description="简短推理：当前界面状态 → 下一步最优先的操作是什么 → 目标元素的坐标判断依据"
-    )
-    action: Action = Field(description="经过推理后，当前最应该执行的一个操作")
+    action: Action = Field(description="当前应该执行的操作")
 
 
 class SupervisorStep(BaseModel):
