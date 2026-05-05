@@ -14,11 +14,11 @@ class Action(BaseModel):
     )
     x: Optional[float] = Field(
         default=None,
-        description="归一化 x 坐标（0-1000，tap/type/scroll 时必填）",
+        description="归一化 x 坐标（0-1000，tap/type 时必填）",
     )
     y: Optional[float] = Field(
         default=None,
-        description="归一化 y 坐标（0-1000，tap/type/scroll 时必填）",
+        description="归一化 y 坐标（0-1000，tap/type 时必填）",
     )
     direction: Optional[str] = Field(
         default=None,

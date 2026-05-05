@@ -1,15 +1,17 @@
 """Fixed action execution layer for policy experiments."""
 
+import io
 import time
 
 from agent.utils import paste_text
+from PIL import Image, ImageChops, ImageStat
+
 from policy_expr.perception import LivePhoneSession
 from policy_expr.schemas import Action, PolicyDecision
 
 WIN_W = 318
 WIN_H = 701
-SCROLL_SWIPE_FROM_Y_FRACTION = 0.56
-SCROLL_SWIPE_TO_Y_FRACTION = 0.11
+SCROLL_DIFF_THRESHOLD = 8.0
 
 
 class ActionExecutor:
@@ -42,12 +44,7 @@ class ActionExecutor:
             paste_text(action.text)
             print("结果: 已通过剪贴板粘贴输入")
 
-        elif (
-            action.action_type == "scroll"
-            and action.x is not None
-            and action.y is not None
-            and action.direction
-        ):
+        elif action.action_type == "scroll" and action.direction:
             self._scroll(action)
 
         elif action.action_type == "home":
@@ -77,21 +74,29 @@ class ActionExecutor:
 
     def _scroll(self, action: Action) -> None:
         direction = (action.direction or "").strip().lower()
-        cx = WIN_W / 2
+        gestures = scroll_gestures(direction)
+        previous = self.phone.screenshot()
 
-        # Match mirroir-mcp's calibration/explorer scroll coordinates. Its
-        # swipe tool posts scroll-wheel events at the midpoint, so the midpoint
-        # must stay in the upper content area rather than near the tab/home bar.
-        if direction in ("up", "向上", "upward"):
-            fy = WIN_H * SCROLL_SWIPE_FROM_Y_FRACTION
-            ty = WIN_H * SCROLL_SWIPE_TO_Y_FRACTION
-        else:
-            fy = WIN_H * SCROLL_SWIPE_TO_Y_FRACTION
-            ty = WIN_H * SCROLL_SWIPE_FROM_Y_FRACTION
+        for kind, args in gestures:
+            from_x, from_y, to_x, to_y, duration_ms = args
+            print(
+                f"执行滚动({direction or action.direction})/{kind}: "
+                f"({from_x:.0f},{from_y:.0f}) -> ({to_x:.0f},{to_y:.0f})"
+            )
+            if kind == "swipe":
+                result = self._client().swipe(from_x, from_y, to_x, to_y, duration_ms=duration_ms)
+            else:
+                result = self._client().drag(from_x, from_y, to_x, to_y, duration_ms=duration_ms)
+            time.sleep(0.8)
+            current = self.phone.screenshot()
+            mean_diff = mean_image_diff(previous, current)
+            print(f"结果: {result}；mean_diff={mean_diff:.2f}")
+            if mean_diff >= SCROLL_DIFF_THRESHOLD:
+                print("滚动成功")
+                return
+            previous = current
 
-        print(f"执行滚动({direction or action.direction}): ({cx:.0f},{fy:.0f}) -> ({cx:.0f},{ty:.0f})")
-        result = self._client().swipe(cx, fy, cx, ty, duration_ms=300)
-        print(f"结果: {result}")
+        print("滚动可能未生效，页面可能已在边界")
 
     def _client(self):
         if not self.phone.client:
@@ -109,3 +114,33 @@ def logical_xy(ax: float, ay: float) -> tuple[float, float]:
 
 def clamp(value: float, low: float, high: float) -> float:
     return min(max(value, low), high)
+
+
+def mean_image_diff(before_png: bytes, after_png: bytes) -> float:
+    before = Image.open(io.BytesIO(before_png)).convert("RGB")
+    after = Image.open(io.BytesIO(after_png)).convert("RGB")
+    diff = ImageChops.difference(before, after)
+    return sum(ImageStat.Stat(diff).mean) / 3
+
+
+def scroll_gestures(direction: str) -> list[tuple[str, tuple[float, float, float, float, int]]]:
+    center_x = WIN_W * 0.50
+    right_safe_x = WIN_W * 0.88
+    upper_y = WIN_H * 0.33
+    lower_y = WIN_H * 0.87
+
+    if direction in ("up", "向上", "upward"):
+        return [
+            ("swipe", (center_x, lower_y, center_x, upper_y, 800)),
+            ("swipe", (right_safe_x, lower_y, right_safe_x, upper_y, 1000)),
+            ("drag", (center_x, lower_y, center_x, upper_y, 1600)),
+            ("drag", (right_safe_x, lower_y, right_safe_x, upper_y, 1800)),
+        ]
+    if direction in ("down", "向下", "downward"):
+        return [
+            ("swipe", (center_x, upper_y, center_x, lower_y, 800)),
+            ("swipe", (right_safe_x, upper_y, right_safe_x, lower_y, 1000)),
+            ("drag", (center_x, upper_y, center_x, lower_y, 1600)),
+            ("drag", (right_safe_x, upper_y, right_safe_x, lower_y, 1800)),
+        ]
+    raise ValueError("scroll direction must be up or down")
