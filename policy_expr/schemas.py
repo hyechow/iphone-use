@@ -88,20 +88,3 @@ class PolicyContext(BaseModel):
     policy_name: str
     turns: list[PolicyTurn] = Field(default_factory=list)
     output: Optional[str] = None
-
-
-class DialogMessage(BaseModel):
-    """One natural-language message in a single-user dialog session."""
-
-    role: str = Field(description="消息角色：user 或 assistant")
-    content: str = Field(description="消息内容")
-    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
-
-
-class DialogContext(BaseModel):
-    """Persistent context for one user's multi-turn natural-language dialog."""
-
-    policy_name: str
-    messages: list[DialogMessage] = Field(default_factory=list)
-    turns: list[PolicyTurn] = Field(default_factory=list)
-    output: Optional[str] = None
