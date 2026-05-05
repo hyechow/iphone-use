@@ -14,6 +14,8 @@ class ValidationResult(BaseModel):
     passed: bool = Field(description="验证是否通过")
     summary: str = Field(description="验证结果说明")
     evidence: Optional[str] = Field(default=None, description="用于判断的关键视觉证据")
+    goal_completed: Optional[bool] = Field(default=None, description="用户目标是否已完全达成（未传入 goal 时为 null）")
+    goal_completed_reason: Optional[str] = Field(default=None, description="目标完成判断的依据说明")
 
 
 class Validator(Protocol):
@@ -26,5 +28,6 @@ class Validator(Protocol):
         before: Observation,
         decision: PolicyDecision,
         after: Observation,
+        goal: str = "",
     ) -> ValidationResult:
         """Return whether the turn outcome looks correct."""

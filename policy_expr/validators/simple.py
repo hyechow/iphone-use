@@ -7,6 +7,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from llm.provider_config import resolve_chat_provider_config
+from llm.structured import invoke_structured
 from policy_expr.policies.base import resize_to_logical_png
 from policy_expr.schemas import Observation, PolicyDecision
 from policy_expr.validators.base import ValidationResult
@@ -27,7 +28,13 @@ SYSTEM_PROMPT = """\
 - home：是否回到主屏幕。
 - 如果无法从截图确认，passed=false，并说明原因。
 
-请用中文填写 summary 和 evidence。
+如果提供了用户目标（goal），还需额外判断：动作后截图是否已完整达成该目标。
+- goal_completed=true：目标已完全实现，无需再进行任何操作。
+- goal_completed=false：目标尚未完成，仍需继续。
+- 未提供 goal 时，goal_completed 填 null。
+请将判断结果填入 goal_completed 和 goal_completed_reason。
+
+请用中文填写所有描述性字段。
 """
 
 
@@ -41,6 +48,7 @@ class SimpleLLMValidator:
         before: Observation,
         decision: PolicyDecision,
         after: Observation,
+        goal: str = "",
     ) -> ValidationResult:
         cfg = resolve_chat_provider_config()
         print(f"Validator Provider : {cfg.provider}")
@@ -50,11 +58,12 @@ class SimpleLLMValidator:
             model=cfg.model,
             api_key=cfg.api_key,
             base_url=cfg.base_url,
-        ).with_structured_output(ValidationResult)
+        )
 
         action = decision.action
         before_b64 = _image_b64(before.png_bytes)
         after_b64 = _image_b64(after.png_bytes)
+        goal_line = f"用户目标（goal）：{goal}\n\n" if goal else ""
         messages = [
             SystemMessage(content=SYSTEM_PROMPT),
             HumanMessage(
@@ -62,6 +71,7 @@ class SimpleLLMValidator:
                     {
                         "type": "text",
                         "text": (
+                            f"{goal_line}"
                             "本轮动作：\n"
                             f"- action_type: {action.action_type}\n"
                             f"- description: {action.description}\n"
@@ -84,7 +94,7 @@ class SimpleLLMValidator:
                 ]
             ),
         ]
-        return llm.invoke(messages)
+        return invoke_structured(llm, messages, ValidationResult)
 
 
 def _image_b64(png_bytes: bytes) -> str:

@@ -7,6 +7,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from llm.provider_config import resolve_chat_provider_config
+from llm.structured import invoke_structured
 from policy_expr.policies.base import BasePolicy, resize_to_logical_png
 from policy_expr.schemas import Observation, PolicyContext, PolicyDecision
 
@@ -45,7 +46,7 @@ class StructuredOutputPolicy(BasePolicy):
             model=cfg.model,
             api_key=cfg.api_key,
             base_url=cfg.base_url,
-        ).with_structured_output(PolicyDecision)
+        )
 
         messages = [
             SystemMessage(content=SYSTEM_PROMPT),
@@ -62,7 +63,7 @@ class StructuredOutputPolicy(BasePolicy):
                 ]
             ),
         ]
-        return llm.invoke(messages)
+        return invoke_structured(llm, messages, PolicyDecision)
 
     def decide_with_context(
         self,
@@ -72,13 +73,27 @@ class StructuredOutputPolicy(BasePolicy):
         if not context.turns:
             return self.decide(observation, context.goal)
 
-        history = "\n".join(
-            f"{turn.index}. 屏幕：{turn.summary}；动作：[{turn.action.action_type}] {turn.action.description}；执行：{turn.executed}"
-            for turn in context.turns[-6:]
-        )
+        def _format_turn(turn) -> str:
+            line = f"{turn.index}. 屏幕：{turn.summary}；动作：[{turn.action.action_type}] {turn.action.description}；执行：{turn.executed}"
+            if turn.validation is not None:
+                status = "✓ 验证通过" if turn.validation.passed else "✗ 验证失败"
+                line += f"；{status}：{turn.validation.summary}"
+            return line
+
+        history = "\n".join(_format_turn(t) for t in context.turns[-6:])
+
+        last = context.turns[-1]
+        retry_hint = ""
+        if last.validation and not last.validation.passed:
+            retry_hint = (
+                f"\n\n⚠️ 上一步动作验证失败（{last.validation.summary}），"
+                "请判断原因并尝试不同的操作方式。"
+            )
+
         prompt = (
             f"{context.goal}\n\n"
             "这是多轮 ReAct 测试的后续轮次。请结合历史记录，只输出当前这一轮最应该执行的一个动作。\n"
             f"历史记录：\n{history}"
+            f"{retry_hint}"
         )
         return self.decide(observation, prompt)

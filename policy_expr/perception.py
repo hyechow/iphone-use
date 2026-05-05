@@ -6,7 +6,7 @@ from agent.sync_mcp_client import SyncMCPClient
 from policy_expr.schemas import Observation
 
 ROOT = Path(__file__).parent.parent
-SCREENSHOT = ROOT / "images" / "screenshot.png"
+SCREENSHOT = ROOT / "logs" / "policy_expr" / "single-step" / "screenshot.png"
 
 
 class LivePhoneSession:
@@ -43,6 +43,7 @@ class LivePerception:
     def observe(self) -> Observation:
         print("截图中...")
         png_bytes = self.phone.screenshot()
+        self.screenshot_path.parent.mkdir(parents=True, exist_ok=True)
         self.screenshot_path.write_bytes(png_bytes)
         print(f"截图大小: {len(png_bytes) // 1024} KB，已保存到 {self.screenshot_path}")
         return Observation(png_bytes=png_bytes, source="live")

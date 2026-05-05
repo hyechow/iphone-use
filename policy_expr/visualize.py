@@ -8,10 +8,14 @@ from PIL import Image, ImageDraw, ImageFont
 from policy_expr.schemas import Action, PolicyDecision
 
 ROOT = Path(__file__).parent.parent
-OUTPUT = ROOT / "images" / "structured_output_result.png"
+OUTPUT = ROOT / "logs" / "policy_expr" / "single-step" / "structured_output_result.png"
 
 
-def print_decision(decision: PolicyDecision, png_bytes: bytes) -> None:
+def print_decision(
+    decision: PolicyDecision,
+    png_bytes: bytes,
+    output_path: Path = OUTPUT,
+) -> None:
     action = decision.action
     coords = f"  ({action.x:.0f},{action.y:.0f})" if action.x is not None else ""
     text = f"  文字={action.text!r}" if action.text else ""
@@ -20,7 +24,7 @@ def print_decision(decision: PolicyDecision, png_bytes: bytes) -> None:
     print("\n" + "=" * 50)
     print(f"[{action.action_type}] {action.description}{coords}{text}")
     print("=" * 50)
-    visualize(png_bytes, action)
+    visualize(png_bytes, action, output_path)
 
 
 def visualize(png_bytes: bytes, action: Action, output_path: Path = OUTPUT) -> None:
@@ -66,6 +70,6 @@ def visualize(png_bytes: bytes, action: Action, output_path: Path = OUTPUT) -> N
     )
 
     result = Image.alpha_composite(img, overlay).convert("RGB")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     result.save(output_path)
     print(f"可视化已保存: {output_path}")
-
