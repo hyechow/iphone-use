@@ -55,6 +55,7 @@ class SupervisorStep(BaseModel):
     stop: bool = Field(description="是否终止 agent loop")
     stop_reason: str = Field(default="", description="终止原因（stop=true 时填写）")
     goal_completed: bool = Field(description="用户目标是否已完全达成")
+    app_name: Optional[str] = Field(default=None, description="当前前台应用名称")
     summary: str = Field(description="对当前屏幕状态和任务进展的简要描述")
 
 

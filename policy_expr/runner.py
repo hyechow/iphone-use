@@ -133,7 +133,7 @@ def run_once(
             print("动作决策中...")
             action_decision = action_policy.decide(observation, sv_step.instruction)
             print_decision(action_decision, observation.png_bytes, log_dir / "structured_output_result.png")
-            executed = ActionExecutor(phone).execute(action_decision)
+            executed = ActionExecutor(phone).execute(action_decision, app_name=sv_step.app_name or "")
 
         turn = PolicyTurn(
             index=1,
@@ -235,7 +235,7 @@ def run_agent_loop(
                     observation.png_bytes,
                     log_dir / f"structured_output_result_turn_{turn_no}.png",
                 )
-                executed = executor.execute(action_decision)
+                executed = executor.execute(action_decision, app_name=sv_step.app_name or "")
 
             turn = PolicyTurn(
                 index=turn_no,

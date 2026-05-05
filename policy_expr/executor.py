@@ -20,13 +20,13 @@ class ActionExecutor:
     def __init__(self, phone: LivePhoneSession):
         self.phone = phone
 
-    def execute(self, decision: ActionDecision) -> bool:
+    def execute(self, decision: ActionDecision, app_name: str = "") -> bool:
         action = decision.action
         print(f"\n动作: [{action.action_type}] {action.description}")
 
         if action.action_type == "tap" and action.x is not None and action.y is not None:
             lx, ly = logical_xy(action.x, action.y)
-            self._tap(lx, ly, decision)
+            self._tap(lx, ly, decision, app_name)
 
         elif (
             action.action_type == "type"
@@ -35,7 +35,7 @@ class ActionExecutor:
             and action.text
         ):
             lx, ly = logical_xy(action.x, action.y)
-            self._tap(lx, ly, decision)
+            self._tap(lx, ly, decision, app_name)
             time.sleep(0.5)
             print(f"输入文字: {action.text!r}")
             paste_text(action.text)
@@ -58,8 +58,13 @@ class ActionExecutor:
 
         return True
 
-    def _tap(self, lx: float, ly: float, decision: ActionDecision) -> None:
+    def _tap(self, lx: float, ly: float, decision: ActionDecision, app_name: str = "") -> None:
         action = decision.action
+        in_wechat = app_name.strip() in ("微信", "WeChat")
+        in_bottom_right = bool(action.x and action.y and action.x > 700 and action.y > 800)
+        if in_wechat and in_bottom_right:
+            print("检测到微信右下角点击，等待浮层消失...")
+            time.sleep(2.0)
         print(f"执行点击: ({lx:.0f}, {ly:.0f})")
         result = self._client().tap(lx, ly)
         print(f"结果: {result}")
