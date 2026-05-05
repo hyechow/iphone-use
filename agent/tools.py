@@ -2,10 +2,11 @@ import base64
 import io
 import subprocess
 import time
+from collections.abc import Callable
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
-from PIL import Image
+from PIL import Image, ImageChops, ImageStat
 
 from agent.sessions import get_client
 from agent.utils import home_indicator_coords
@@ -35,6 +36,65 @@ def _press_enter() -> None:
         "osascript", "-e",
         'tell application "System Events" to key code 36',
     ], check=True)
+
+
+def _mean_image_diff(before_png: bytes, after_png: bytes) -> float:
+    before = Image.open(io.BytesIO(before_png)).convert("RGB")
+    after = Image.open(io.BytesIO(after_png)).convert("RGB")
+    diff = ImageChops.difference(before, after)
+    return sum(ImageStat.Stat(diff).mean) / 3
+
+
+def _scroll_gestures(
+    direction: str,
+) -> list[tuple[str, tuple[float, float, float, float, int]]]:
+    w, h = 318, 701
+    center_x = w * 0.50
+    right_safe_x = w * 0.88
+    left_safe_x = w * 0.20
+    upper_y = h * 0.33
+    lower_y = h * 0.87
+    left_x = w * 0.12
+    right_x = w * 0.88
+    mid_y = h * 0.55
+
+    if direction == "up":
+        return [
+            ("swipe", (center_x, lower_y, center_x, upper_y, 800)),
+            ("swipe", (right_safe_x, lower_y, right_safe_x, upper_y, 1000)),
+            ("drag", (center_x, lower_y, center_x, upper_y, 1600)),
+            ("drag", (right_safe_x, lower_y, right_safe_x, upper_y, 1800)),
+        ]
+    if direction == "down":
+        return [
+            ("swipe", (center_x, upper_y, center_x, lower_y, 800)),
+            ("swipe", (right_safe_x, upper_y, right_safe_x, lower_y, 1000)),
+            ("drag", (center_x, upper_y, center_x, lower_y, 1600)),
+            ("drag", (right_safe_x, upper_y, right_safe_x, lower_y, 1800)),
+        ]
+    if direction == "left":
+        return [
+            ("swipe", (right_x, mid_y, left_x, mid_y, 700)),
+            ("drag", (right_x, mid_y, left_x, mid_y, 1400)),
+        ]
+    if direction == "right":
+        return [
+            ("swipe", (left_x, mid_y, right_x, mid_y, 700)),
+            ("drag", (left_x, mid_y, right_x, mid_y, 1400)),
+        ]
+    raise ValueError("direction must be one of: up, down, left, right")
+
+
+def _call_gesture(
+    kind: str,
+    args: tuple[float, float, float, float, int],
+    swipe: Callable[..., str],
+    drag: Callable[..., str],
+) -> str:
+    from_x, from_y, to_x, to_y, duration_ms = args
+    if kind == "swipe":
+        return swipe(from_x, from_y, to_x, to_y, duration_ms=duration_ms)
+    return drag(from_x, from_y, to_x, to_y, duration_ms=duration_ms)
 
 
 @tool
@@ -129,4 +189,39 @@ def tap_and_type(x: float, y: float, text: str, config: RunnableConfig, press_en
     return f"Tapped ({lx:.0f}, {ly:.0f}) and typed: {text!r}"
 
 
-TOOLS = [tap_screen, go_to_home_screen, type_text, tap_and_type]
+@tool
+def scroll_screen(
+    config: RunnableConfig,
+    direction: str = "up",
+    max_attempts: int = 4,
+) -> str:
+    """Scroll the current iPhone page.
+
+    Use this when the current page needs to move up, down, left, or right.
+
+    Args:
+        direction: One of up, down, left, right. "up" means finger swipes upward,
+            usually revealing lower content in vertical lists.
+        max_attempts: Maximum attempts before reporting that the page did not move.
+    """
+    if direction not in {"up", "down", "left", "right"}:
+        raise ValueError("direction must be one of: up, down, left, right")
+
+    session_id = config["configurable"]["thread_id"]
+    client = get_client(session_id)
+    previous = client.screenshot()
+
+    gestures = _scroll_gestures(direction)[: max(1, max_attempts)]
+    for kind, gesture_args in gestures:
+        _call_gesture(kind, gesture_args, client.swipe, client.drag)
+        time.sleep(0.8)
+        current = client.screenshot()
+        mean_diff = _mean_image_diff(previous, current)
+        if mean_diff >= 8.0:
+            return f"Scrolled {direction}."
+        previous = current
+
+    return f"Could not scroll {direction}; the page may already be at the edge."
+
+
+TOOLS = [tap_screen, go_to_home_screen, type_text, tap_and_type, scroll_screen]

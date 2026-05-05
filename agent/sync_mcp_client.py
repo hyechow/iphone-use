@@ -100,6 +100,30 @@ class SyncMCPClient:
         )
         return text_content(result)
 
+    def drag(
+        self,
+        from_x: float,
+        from_y: float,
+        to_x: float,
+        to_y: float,
+        duration_ms: int = 1000,
+        cursor_mode: str | None = None,
+    ) -> str:
+        arguments = {
+            "from_x": round(from_x),
+            "from_y": round(from_y),
+            "to_x": round(to_x),
+            "to_y": round(to_y),
+            "duration_ms": duration_ms,
+        }
+        if cursor_mode:
+            arguments["cursor_mode"] = cursor_mode
+        result = self.call_tool(
+            "drag",
+            arguments,
+        )
+        return text_content(result)
+
     def list_targets(self) -> str:
         result = self.call_tool("list_targets")
         return text_content(result)
