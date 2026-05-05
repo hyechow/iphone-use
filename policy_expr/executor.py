@@ -7,7 +7,7 @@ from agent.utils import paste_text
 from PIL import Image, ImageChops, ImageStat
 
 from policy_expr.perception import LivePhoneSession
-from policy_expr.schemas import Action, PolicyDecision
+from policy_expr.schemas import Action, ActionDecision
 
 WIN_W = 318
 WIN_H = 701
@@ -20,14 +20,11 @@ class ActionExecutor:
     def __init__(self, phone: LivePhoneSession):
         self.phone = phone
 
-    def execute(self, decision: PolicyDecision) -> bool:
+    def execute(self, decision: ActionDecision) -> bool:
         action = decision.action
         print(f"\n动作: [{action.action_type}] {action.description}")
 
-        if action.action_type == "nop":
-            print("无需操作")
-
-        elif action.action_type == "tap" and action.x is not None and action.y is not None:
+        if action.action_type == "tap" and action.x is not None and action.y is not None:
             lx, ly = logical_xy(action.x, action.y)
             self._tap(lx, ly, decision)
 
@@ -61,7 +58,7 @@ class ActionExecutor:
 
         return True
 
-    def _tap(self, lx: float, ly: float, decision: PolicyDecision) -> None:
+    def _tap(self, lx: float, ly: float, decision: ActionDecision) -> None:
         action = decision.action
         in_wechat = (decision.app_name or "").strip() in ("微信", "WeChat")
         in_bottom_right = bool(action.x and action.y and action.x > 700 and action.y > 800)

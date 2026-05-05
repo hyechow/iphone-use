@@ -1,4 +1,4 @@
-"""Structured-output multimodal LLM policy."""
+"""Structured-output multimodal LLM action policy."""
 
 import base64
 
@@ -8,20 +8,20 @@ from langchain_openai import ChatOpenAI
 
 from policy_expr.config import resolve_llm_config
 from llm.structured import invoke_structured
-from policy_expr.policies.base import BasePolicy, resize_to_logical_png
-from policy_expr.schemas import Observation, PolicyContext, PolicyDecision
+from policy_expr.policies.base import BaseActionPolicy, resize_to_logical_png
+from policy_expr.schemas import ActionDecision, Observation
 
 load_dotenv()
 
 
 SYSTEM_PROMPT = """\
 你是一个专业的 iPhone 操作助手。
-用户会提供 iPhone 截图和一个目标指令。请简短思考：
-- 当前界面是什么状态？
-- 为了完成目标，现在最优先的下一步操作是什么？
-- 该操作的目标元素在哪里，坐标怎么判断？
+用户会提供 iPhone 截图和一个具体的操作指令。请：
+- 理解当前界面状态
+- 找到操作指令所指向的目标元素
+- 判断目标元素的精确位置
 
-只关注"现在要做什么"，不要列出后续所有步骤。
+只关注"当前指令对应的这一个动作"，不要考虑后续步骤。
 坐标使用归一化坐标系：左上角(0,0)，右下角(1000,1000)。
 需要在输入框中输入文字时，使用 type（而非 tap），它会自动先点击再输入。
 需要滚动页面时，使用 scroll，只填写 direction（up=向上滚动看更多，down=向下滚动回顶部）。
@@ -31,13 +31,13 @@ SYSTEM_PROMPT = """\
 """
 
 
-class StructuredOutputPolicy(BasePolicy):
-    """Current baseline policy: LLM vision + structured output."""
+class StructuredOutputPolicy(BaseActionPolicy):
+    """Vision-based action policy: LLM screenshot analysis + structured output."""
 
     name = "structured_output"
 
-    def decide(self, observation: Observation, prompt: str) -> PolicyDecision:
-        cfg = resolve_llm_config("policy")
+    def decide(self, observation: Observation, instruction: str) -> ActionDecision:
+        cfg = resolve_llm_config("action_policy")
         print(f"Provider : {cfg.provider}")
         print(f"Model    : {cfg.model}")
 
@@ -54,7 +54,7 @@ class StructuredOutputPolicy(BasePolicy):
                 content=[
                     {
                         "type": "text",
-                        "text": f"目标：{prompt}\n\n请根据截图判断当前应该执行哪些操作。",
+                        "text": f"操作指令：{instruction}\n\n请根据截图执行该指令。",
                     },
                     {
                         "type": "image_url",
@@ -63,37 +63,4 @@ class StructuredOutputPolicy(BasePolicy):
                 ]
             ),
         ]
-        return invoke_structured(llm, messages, PolicyDecision)
-
-    def decide_with_context(
-        self,
-        observation: Observation,
-        context: PolicyContext,
-    ) -> PolicyDecision:
-        if not context.turns:
-            return self.decide(observation, context.goal)
-
-        def _format_turn(turn) -> str:
-            line = f"{turn.index}. 屏幕：{turn.summary}；动作：[{turn.action.action_type}] {turn.action.description}；执行：{turn.executed}"
-            if turn.validation is not None:
-                status = "✓ 验证通过" if turn.validation.passed else "✗ 验证失败"
-                line += f"；{status}：{turn.validation.summary}"
-            return line
-
-        history = "\n".join(_format_turn(t) for t in context.turns[-6:])
-
-        last = context.turns[-1]
-        retry_hint = ""
-        if last.validation and not last.validation.passed:
-            retry_hint = (
-                f"\n\n⚠️ 上一步动作验证失败（{last.validation.summary}），"
-                "请判断原因并尝试不同的操作方式。"
-            )
-
-        prompt = (
-            f"{context.goal}\n\n"
-            "这是多轮 ReAct 测试的后续轮次。请结合历史记录，只输出当前这一轮最应该执行的一个动作。\n"
-            f"历史记录：\n{history}"
-            f"{retry_hint}"
-        )
-        return self.decide(observation, prompt)
+        return invoke_structured(llm, messages, ActionDecision)

@@ -1,6 +1,7 @@
-"""CLI runner for single-turn policy experiments."""
+"""CLI runner for policy experiments with two-layer architecture."""
 
 import argparse
+import json
 import sys
 import time
 from datetime import datetime
@@ -10,25 +11,27 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from policy_expr.executor import ActionExecutor
+from policy_expr.supervisor import SimpleSupervisorPolicy
+from policy_expr.supervisor.base import SupervisorPolicy
 from policy_expr.output import render_final_output
 from policy_expr.perception import LivePerception, LivePhoneSession
 from policy_expr.policies import StructuredOutputPolicy
-from policy_expr.policies.base import Policy
+from policy_expr.policies.base import ActionPolicy
 from policy_expr.schemas import (
+    ActionDecision,
     Observation,
     PolicyContext,
-    PolicyDecision,
     PolicyTurn,
-    TurnValidation,
+    SupervisorStep,
 )
-from policy_expr.validators import SimpleLLMValidator, Validator
 from policy_expr.visualize import print_decision
 
-POLICIES: dict[str, type[Policy]] = {
+POLICIES: dict[str, type[ActionPolicy]] = {
     StructuredOutputPolicy.name: StructuredOutputPolicy,
 }
-VALIDATORS: dict[str, type[Validator]] = {
-    SimpleLLMValidator.name: SimpleLLMValidator,
+
+SUPERVISORS: dict[str, type[SupervisorPolicy]] = {
+    SimpleSupervisorPolicy.name: SimpleSupervisorPolicy,
 }
 
 ROOT = Path(__file__).parent.parent
@@ -46,52 +49,39 @@ def create_run_dir(mode: str) -> Path:
     return path
 
 
-def build_policy(name: str) -> Policy:
+def build_policy(name: str) -> ActionPolicy:
     try:
-        policy_cls = POLICIES[name]
+        return POLICIES[name]()
     except KeyError as exc:
         choices = ", ".join(sorted(POLICIES))
         raise ValueError(f"未知策略 {name!r}，可选：{choices}") from exc
-    return policy_cls()
 
 
-def build_validator(name: str | None) -> Validator | None:
-    if name in (None, "none"):
-        return None
+def build_supervisor(name: str) -> SupervisorPolicy:
     try:
-        validator_cls = VALIDATORS[name]
+        return SUPERVISORS[name]()
     except KeyError as exc:
-        choices = ", ".join(["none", *sorted(VALIDATORS)])
-        raise ValueError(f"未知验证器 {name!r}，可选：{choices}") from exc
-    return validator_cls()
+        choices = ", ".join(sorted(SUPERVISORS))
+        raise ValueError(f"未知监督者 {name!r}，可选：{choices}") from exc
 
 
-def validate_turn(
-    validator: Validator | None,
-    before: Observation,
-    decision: PolicyDecision,
-    after: Observation,
-    goal: str = "",
-) -> TurnValidation | None:
-    if validator is None:
-        return None
+def _save_context(path: Path, context: PolicyContext) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(context.model_dump_json(indent=2), encoding="utf-8")
 
-    print("验证中...")
-    result = validator.validate(before, decision, after, goal=goal)
-    status = "通过" if result.passed else "未通过"
-    print(f"验证结果: {status} - {result.summary}")
-    if result.evidence:
-        print(f"验证证据: {result.evidence}")
-    if result.goal_completed is not None:
-        completed = "已达成" if result.goal_completed else "未达成"
-        print(f"目标状态: {completed} - {result.goal_completed_reason}")
-    return TurnValidation(
-        validator_name=validator.name,
-        passed=result.passed,
-        summary=result.summary,
-        evidence=result.evidence,
-        goal_completed=result.goal_completed,
-        goal_completed_reason=result.goal_completed_reason,
+
+def _load_context(
+    path: Path,
+    prompt: str,
+    supervisor_name: str,
+    action_name: str,
+) -> PolicyContext:
+    if path.exists():
+        return PolicyContext.model_validate(json.loads(path.read_text(encoding="utf-8")))
+    return PolicyContext(
+        goal=prompt,
+        supervisor_policy_name=supervisor_name,
+        action_policy_name=action_name,
     )
 
 
@@ -113,13 +103,17 @@ def emit_final_output(
 
 def run_once(
     prompt: str,
-    policy: Policy,
-    validator: Validator | None,
+    action_policy: ActionPolicy,
+    supervisor: SupervisorPolicy,
     log_dir: Path,
     context_path: Path,
 ) -> None:
-    context = PolicyContext(goal=prompt, policy_name=policy.name)
-    policy.save_context(context_path, context)
+    context = PolicyContext(
+        goal=prompt,
+        supervisor_policy_name=supervisor.name,
+        action_policy_name=action_policy.name,
+    )
+    _save_context(context_path, context)
     print(f"Goal    : {context.goal}")
     print(f"Turns   : {len(context.turns)}")
 
@@ -127,57 +121,91 @@ def run_once(
         perception = LivePerception(phone, log_dir / "screenshot.png")
         observation = perception.observe()
 
-        print("分析中...")
-        decision = policy.decide(observation, prompt)
-        print_decision(decision, observation.png_bytes, log_dir / "structured_output_result.png")
+        print("监督决策中...")
+        sv_step = supervisor.step(observation, context.goal, context.turns)
+        print(f"监督者: {sv_step.summary}")
 
-        executed = ActionExecutor(phone).execute(decision)
-        if not executed:
-            policy.append_turn(context, observation, decision, executed)
-            context.output = emit_final_output(
-                context.goal,
-                context.policy_name,
-                context.turns,
-                log_dir,
-                "动作未执行，运行停止",
-            )
-            policy.save_context(context_path, context)
-            print(f"Context 已保存: {context_path}")
-            return
+        action_decision = None
+        executed = False
 
-        time.sleep(1.5)
-        print("点击后截图...")
-        after_bytes = phone.screenshot()
-        after_observation = Observation(png_bytes=after_bytes, source="live")
-        after_path = log_dir / "screenshot_after.png"
-        after_path.write_bytes(after_bytes)
-        print(f"已保存: {after_path}")
-        validation = validate_turn(validator, observation, decision, after_observation, goal=context.goal)
-        policy.append_turn(context, observation, decision, executed, validation)
+        if sv_step.should_act:
+            print(f"动作指令: {sv_step.instruction}")
+            print("动作决策中...")
+            action_decision = action_policy.decide(observation, sv_step.instruction)
+            print_decision(action_decision, observation.png_bytes, log_dir / "structured_output_result.png")
+            executed = ActionExecutor(phone).execute(action_decision)
+
+        turn = PolicyTurn(
+            index=1,
+            observation_source=observation.source,
+            supervisor=SupervisorStep(
+                should_act=sv_step.should_act,
+                instruction=sv_step.instruction,
+                stop=sv_step.stop,
+                stop_reason=sv_step.stop_reason,
+                goal_completed=sv_step.goal_completed,
+                summary=sv_step.summary,
+            ),
+            action_decision=action_decision,
+            executed=executed,
+        )
+        context.turns.append(turn)
+        _save_context(context_path, context)
+
+        if executed:
+            time.sleep(1.5)
+            after_bytes = phone.screenshot()
+            after_obs = Observation(png_bytes=after_bytes, source="live")
+            after_path = log_dir / "screenshot_after.png"
+            after_path.write_bytes(after_bytes)
+            print(f"已保存: {after_path}")
+
+            print("验证中...")
+            confirm = supervisor.step(after_obs, context.goal, context.turns)
+            context.turns.append(PolicyTurn(
+                index=2,
+                observation_source="live",
+                supervisor=SupervisorStep(
+                    should_act=confirm.should_act,
+                    instruction=confirm.instruction,
+                    stop=confirm.stop,
+                    stop_reason=confirm.stop_reason,
+                    goal_completed=confirm.goal_completed,
+                    summary=confirm.summary,
+                ),
+                action_decision=None,
+                executed=False,
+            ))
+            stop_reason = confirm.stop_reason or "single-step 完成一轮后停止"
+        else:
+            stop_reason = "动作未执行，single-step 停止"
+
         context.output = emit_final_output(
             context.goal,
-            context.policy_name,
+            supervisor.name,
             context.turns,
             log_dir,
-            "single-step 完成一轮后停止",
+            stop_reason,
         )
-        policy.save_context(context_path, context)
+        _save_context(context_path, context)
         print(f"Context 已保存: {context_path}")
 
 
 def run_agent_loop(
     prompt: str,
-    policy: Policy,
-    validator: Validator | None,
+    action_policy: ActionPolicy,
+    supervisor: SupervisorPolicy,
     input_context_path: Path | None,
     log_dir: Path,
     context_path: Path,
 ) -> None:
-    if input_context_path is None:
-        context = PolicyContext(goal=prompt, policy_name=policy.name)
-    else:
-        context = policy.load_context(input_context_path, prompt)
-    policy.save_context(context_path, context)
+    context = _load_context(
+        input_context_path or context_path,
+        prompt,
+        supervisor.name,
+        action_policy.name,
+    )
+    _save_context(context_path, context)
     print(f"Goal    : {context.goal}")
     print(f"Turns   : {len(context.turns)}")
 
@@ -187,64 +215,80 @@ def run_agent_loop(
         while True:
             turn_no = len(context.turns) + 1
             print(f"\n--- Turn {turn_no} ---")
+
             perception = LivePerception(phone, log_dir / f"screenshot_turn_{turn_no}.png")
             observation = perception.observe()
 
-            print("分析中...")
-            decision = policy.decide_with_context(observation, context)
-            print_decision(decision, observation.png_bytes, log_dir / f"structured_output_result_turn_{turn_no}.png")
+            print("监督决策中...")
+            sv_step = supervisor.step(observation, context.goal, context.turns)
+            print(f"监督者: {sv_step.summary}")
 
-            executed = executor.execute(decision)
-            validation = None
-            if executed:
-                time.sleep(1.5)
-                print("动作后截图...")
-                after_bytes = phone.screenshot()
-                after_observation = Observation(png_bytes=after_bytes, source="live")
-                after_path = log_dir / f"screenshot_after_turn_{turn_no}.png"
-                after_path.write_bytes(after_bytes)
-                print(f"已保存: {after_path}")
-                validation = validate_turn(validator, observation, decision, after_observation, goal=context.goal)
+            action_decision = None
+            executed = False
 
-            policy.append_turn(context, observation, decision, executed, validation)
-            if not executed:
+            if sv_step.should_act:
+                print(f"动作指令: {sv_step.instruction}")
+                print("动作决策中...")
+                action_decision = action_policy.decide(observation, sv_step.instruction)
+                print_decision(
+                    action_decision,
+                    observation.png_bytes,
+                    log_dir / f"structured_output_result_turn_{turn_no}.png",
+                )
+                executed = executor.execute(action_decision)
+
+            turn = PolicyTurn(
+                index=turn_no,
+                observation_source=observation.source,
+                supervisor=SupervisorStep(
+                    should_act=sv_step.should_act,
+                    instruction=sv_step.instruction,
+                    stop=sv_step.stop,
+                    stop_reason=sv_step.stop_reason,
+                    goal_completed=sv_step.goal_completed,
+                    summary=sv_step.summary,
+                ),
+                action_decision=action_decision,
+                executed=executed,
+            )
+            context.turns.append(turn)
+            _save_context(context_path, context)
+            print(f"Context 已保存: {context_path}")
+
+            if sv_step.stop or sv_step.goal_completed:
+                reason = sv_step.stop_reason or "目标已达成"
+                print(f"\n目标已达成：{reason}")
                 context.output = emit_final_output(
                     context.goal,
-                    context.policy_name,
+                    supervisor.name,
+                    context.turns,
+                    log_dir,
+                    reason,
+                )
+                _save_context(context_path, context)
+                return
+
+            if not executed and sv_step.should_act:
+                context.output = emit_final_output(
+                    context.goal,
+                    supervisor.name,
                     context.turns,
                     log_dir,
                     "动作未执行，agent-loop 停止",
                 )
-                policy.save_context(context_path, context)
-                print(f"Context 已保存: {context_path}")
+                _save_context(context_path, context)
                 return
 
-            if validation and validation.goal_completed:
-                print(f"\n目标已达成：{validation.goal_completed_reason}")
-                context.output = emit_final_output(
-                    context.goal,
-                    context.policy_name,
-                    context.turns,
-                    log_dir,
-                    f"目标已达成：{validation.goal_completed_reason}",
-                )
-                policy.save_context(context_path, context)
-                print(f"Context 已保存: {context_path}")
-                return
-
-            policy.save_context(context_path, context)
-            print(f"Context 已保存: {context_path}")
-            answer = input("继续下一轮 ReAct？[Enter继续 / q退出] ").strip().lower()
+            answer = input("继续下一轮？[Enter继续 / q退出] ").strip().lower()
             if answer in {"q", "quit", "exit"}:
                 context.output = emit_final_output(
                     context.goal,
-                    context.policy_name,
+                    supervisor.name,
                     context.turns,
                     log_dir,
                     "用户退出 agent-loop",
                 )
-                policy.save_context(context_path, context)
-                print(f"Context 已保存: {context_path}")
+                _save_context(context_path, context)
                 return
 
 
@@ -260,29 +304,29 @@ def main() -> None:
         "--policy",
         default=StructuredOutputPolicy.name,
         choices=sorted(POLICIES),
-        help="要测试的策略模块",
+        help="动作策略模块",
+    )
+    parser.add_argument(
+        "--supervisor",
+        default=SimpleSupervisorPolicy.name,
+        choices=sorted(SUPERVISORS),
+        help="监督者策略模块",
     )
     parser.add_argument(
         "--mode",
         default="single-step",
         choices=["single-step", "agent-loop"],
-        help="运行模式：single-step 单步 ReAct；agent-loop 单目标自动多步 ReAct",
+        help="运行模式：single-step 单步；agent-loop 多步自动循环",
     )
     parser.add_argument(
         "--context",
         type=Path,
-        help="agent-loop 可选的 context 加载路径；本次运行的 context 固定保存到 logs/policy_expr/<mode>/<启动时间>/context.json",
-    )
-    parser.add_argument(
-        "--validator",
-        default=SimpleLLMValidator.name,
-        choices=["none", *sorted(VALIDATORS)],
-        help="动作后验证器",
+        help="agent-loop 可选的 context 加载路径",
     )
     args = parser.parse_args()
 
-    policy = build_policy(args.policy)
-    validator = build_validator(args.validator)
+    action_policy = build_policy(args.policy)
+    supervisor = build_supervisor(args.supervisor)
     mode = args.mode
     input_context_path = args.context
     log_dir = create_run_dir(mode)
@@ -293,9 +337,9 @@ def main() -> None:
     if mode == "single-step":
         if input_context_path is not None:
             raise ValueError("--context 目前只支持 agent-loop 模式")
-        run_once(args.prompt, policy, validator, log_dir, context_path)
+        run_once(args.prompt, action_policy, supervisor, log_dir, context_path)
     elif mode == "agent-loop":
-        run_agent_loop(args.prompt, policy, validator, input_context_path, log_dir, context_path)
+        run_agent_loop(args.prompt, action_policy, supervisor, input_context_path, log_dir, context_path)
 
 
 if __name__ == "__main__":

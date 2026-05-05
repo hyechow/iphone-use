@@ -7,10 +7,10 @@ from pydantic import BaseModel, Field
 
 
 class Action(BaseModel):
-    """A single phone action in normalized coordinates, or nop when no action is needed."""
+    """A single phone action in normalized coordinates."""
 
     action_type: str = Field(
-        description="操作类型：tap（纯点击）、type（点击输入框并输入文字）、scroll（滚动）、home（返回主屏幕）、nop（无需操作）之一"
+        description="操作类型：tap（纯点击）、type（点击输入框并输入文字）、scroll（滚动）、home（返回主屏幕）之一"
     )
     x: Optional[float] = Field(
         default=None,
@@ -38,8 +38,8 @@ class Observation(BaseModel):
     source: str = Field(description="观测来源")
 
 
-class PolicyDecision(BaseModel):
-    """Policy output: state interpretation plus the next action."""
+class ActionDecision(BaseModel):
+    """Action policy output: screen interpretation plus the next action."""
 
     screen_type: str = Field(
         description="屏幕类型，如 home_screen、app_page、settings、dialog 等"
@@ -55,15 +55,18 @@ class PolicyDecision(BaseModel):
     action: Action = Field(description="经过推理后，当前最应该执行的一个操作")
 
 
-class TurnValidation(BaseModel):
-    """Validation summary saved with a policy turn."""
+class SupervisorStep(BaseModel):
+    """Supervisor policy decision for one turn."""
 
-    validator_name: str
-    passed: bool
-    summary: str
-    evidence: Optional[str] = None
-    goal_completed: Optional[bool] = None
-    goal_completed_reason: Optional[str] = None
+    should_act: bool = Field(description="是否调用 action policy 执行动作")
+    instruction: Optional[str] = Field(
+        default=None,
+        description="给 action policy 的精确操作指令（should_act=true 时必填）",
+    )
+    stop: bool = Field(description="是否终止 agent loop")
+    stop_reason: str = Field(default="", description="终止原因（stop=true 时填写）")
+    goal_completed: bool = Field(description="用户目标是否已完全达成")
+    summary: str = Field(description="对当前屏幕状态和任务进展的简要描述")
 
 
 class PolicyTurn(BaseModel):
@@ -72,19 +75,16 @@ class PolicyTurn(BaseModel):
     index: int
     timestamp: str = Field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     observation_source: str
-    screen_type: str
-    app_name: Optional[str] = None
-    summary: str
-    reasoning: str
-    action: Action
-    executed: bool
-    validation: Optional[TurnValidation] = None
+    supervisor: SupervisorStep
+    action_decision: Optional[ActionDecision] = None
+    executed: bool = False
 
 
 class PolicyContext(BaseModel):
     """Persistent context for multi-turn policy experiments."""
 
     goal: str
-    policy_name: str
+    supervisor_policy_name: str
+    action_policy_name: str
     turns: list[PolicyTurn] = Field(default_factory=list)
     output: Optional[str] = None
