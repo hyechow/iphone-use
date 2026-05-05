@@ -6,8 +6,8 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
-from llm.provider_config import resolve_chat_provider_config
 from llm.structured import invoke_structured
+from policy_expr.config import resolve_llm_config
 from policy_expr.policies.base import resize_to_logical_png
 from policy_expr.schemas import Observation, PolicyDecision
 from policy_expr.validators.base import ValidationResult
@@ -50,7 +50,7 @@ class SimpleLLMValidator:
         after: Observation,
         goal: str = "",
     ) -> ValidationResult:
-        cfg = resolve_chat_provider_config()
+        cfg = resolve_llm_config("validator")
         print(f"Validator Provider : {cfg.provider}")
         print(f"Validator Model    : {cfg.model}")
 

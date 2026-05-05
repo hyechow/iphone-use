@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
-from llm.provider_config import resolve_chat_provider_config
+from policy_expr.config import resolve_llm_config
 from llm.structured import invoke_structured
 from policy_expr.policies.base import BasePolicy, resize_to_logical_png
 from policy_expr.schemas import Observation, PolicyContext, PolicyDecision
@@ -37,7 +37,7 @@ class StructuredOutputPolicy(BasePolicy):
     name = "structured_output"
 
     def decide(self, observation: Observation, prompt: str) -> PolicyDecision:
-        cfg = resolve_chat_provider_config()
+        cfg = resolve_llm_config("policy")
         print(f"Provider : {cfg.provider}")
         print(f"Model    : {cfg.model}")
 

@@ -1,0 +1,12 @@
+# LLM settings for policy_expr.
+# Leave fields empty to use existing environment-variable defaults.
+llm:
+  policy:
+    provider: modelscope
+    model: Qwen/Qwen3.5-27B
+  validator:
+    provider: modelscope
+    model: Qwen/Qwen3.5-27B
+  output:
+    provider: modelscope
+    model: Qwen/Qwen3.5-27B

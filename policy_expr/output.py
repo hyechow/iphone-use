@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
-from llm.provider_config import resolve_chat_provider_config
+from policy_expr.config import resolve_llm_config
 from policy_expr.schemas import PolicyTurn
 
 load_dotenv()
@@ -38,7 +38,7 @@ def render_final_output(
 ) -> str:
     """Use an LLM to render a concise final summary for a finished policy run."""
 
-    cfg = resolve_chat_provider_config()
+    cfg = resolve_llm_config("output")
     llm = ChatOpenAI(
         model=cfg.model,
         api_key=cfg.api_key,
