@@ -5,8 +5,12 @@ llm:
     provider: modelscope
     model: Qwen/Qwen3.5-27B
   supervisor:
-    provider: modelscope
-    model: Qwen/Qwen3.5-27B
+    checker:
+      provider: modelscope
+      model: Qwen/Qwen3.5-27B
+    planner:
+      provider: modelscope
+      model: Qwen/Qwen3-30B-A3B-Instruct-2507
   output:
     provider: modelscope
     model: Qwen/Qwen3.5-27B

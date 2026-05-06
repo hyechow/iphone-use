@@ -47,9 +47,9 @@ class SimpleSupervisorPolicy:
         goal: str,
         history: list[PolicyTurn],
     ) -> SupervisorStep:
-        cfg = resolve_llm_config("supervisor")
-        print(f"Supervisor Provider : {cfg.provider}")
-        print(f"Supervisor Model    : {cfg.model}")
+        cfg = resolve_llm_config("supervisor.checker")
+        print(f"Checker Provider    : {cfg.provider}")
+        print(f"Checker Model       : {cfg.model}")
 
         llm = ChatOpenAI(
             model=cfg.model,
@@ -103,3 +103,36 @@ def _format_history(history: list[PolicyTurn]) -> str:
         else:
             lines.append(f"{turn.index}. [跳过动作] {sv.summary}")
     return "\n".join(lines)
+
+
+# ── CLI entry point: uv run python -m policy_expr.supervisor.simple "goal" ──
+
+
+if __name__ == "__main__":
+    import sys
+    from pathlib import Path
+
+    from policy_expr.perception import LivePhoneSession
+
+    goal = sys.argv[1] if len(sys.argv) > 1 else "打开微信"
+    print(f"Goal: {goal}\n")
+
+    sup = SimpleSupervisorPolicy()
+
+    with LivePhoneSession() as phone:
+        png_bytes = phone.screenshot()
+        observation = Observation(png_bytes=png_bytes, source="live")
+
+        log_dir = Path(__file__).parent.parent.parent / "logs" / "policy_expr" / "test"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        shot_path = log_dir / "screenshot.png"
+        shot_path.write_bytes(png_bytes)
+        print(f"截图已保存: {shot_path}\n")
+
+        sv = sup.step(observation, goal, [])
+        print(f"should_act     : {sv.should_act}")
+        print(f"instruction    : {sv.instruction}")
+        print(f"stop           : {sv.stop}")
+        print(f"goal_completed : {sv.goal_completed}")
+        print(f"app_name       : {sv.app_name}")
+        print(f"summary        : {sv.summary}")

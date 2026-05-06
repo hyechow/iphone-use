@@ -22,10 +22,18 @@ def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
 
 
 def resolve_llm_config(name: str) -> ChatProviderConfig:
-    """Resolve LLM config for policy, validator, or output."""
+    """Resolve LLM config by dotted name (e.g. 'supervisor.checker')."""
 
     llm_config = load_config().get("llm", {})
-    section = llm_config.get(name, {}) if isinstance(llm_config, dict) else {}
+    if not isinstance(llm_config, dict):
+        raise ValueError("policy_expr config 'llm' must be a mapping")
+
+    section = llm_config
+    for key in name.split("."):
+        if not isinstance(section, dict):
+            raise ValueError(f"policy_expr config llm.{name} must be a mapping")
+        section = section.get(key, {})
+
     if not isinstance(section, dict):
         raise ValueError(f"policy_expr config llm.{name} must be a mapping")
     return resolve_chat_provider_config(

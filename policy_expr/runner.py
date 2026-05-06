@@ -11,7 +11,7 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from policy_expr.executor import ActionExecutor
-from policy_expr.supervisor import SimpleSupervisorPolicy
+from policy_expr.supervisor import MilestoneSupervisorPolicy, SimpleSupervisorPolicy
 from policy_expr.supervisor.base import SupervisorPolicy
 from policy_expr.output import render_final_output
 from policy_expr.perception import LivePerception, LivePhoneSession
@@ -32,6 +32,7 @@ POLICIES: dict[str, type[ActionPolicy]] = {
 
 SUPERVISORS: dict[str, type[SupervisorPolicy]] = {
     SimpleSupervisorPolicy.name: SimpleSupervisorPolicy,
+    MilestoneSupervisorPolicy.name: MilestoneSupervisorPolicy,
 }
 
 ROOT = Path(__file__).parent.parent
@@ -180,13 +181,13 @@ def run_once(
         else:
             stop_reason = "动作未执行，single-step 停止"
 
-        context.output = emit_final_output(
-            context.goal,
-            supervisor.name,
-            context.turns,
-            log_dir,
-            stop_reason,
-        )
+        # context.output = emit_final_output(
+        #     context.goal,
+        #     supervisor.name,
+        #     context.turns,
+        #     log_dir,
+        #     stop_reason,
+        # )
         _save_context(context_path, context)
         print(f"Context 已保存: {context_path}")
 
@@ -258,36 +259,36 @@ def run_agent_loop(
             if sv_step.stop or sv_step.goal_completed:
                 reason = sv_step.stop_reason or "目标已达成"
                 print(f"\n目标已达成：{reason}")
-                context.output = emit_final_output(
-                    context.goal,
-                    supervisor.name,
-                    context.turns,
-                    log_dir,
-                    reason,
-                )
+                # context.output = emit_final_output(
+                #     context.goal,
+                #     supervisor.name,
+                #     context.turns,
+                #     log_dir,
+                #     reason,
+                # )
                 _save_context(context_path, context)
                 return
 
             if not executed and sv_step.should_act:
-                context.output = emit_final_output(
-                    context.goal,
-                    supervisor.name,
-                    context.turns,
-                    log_dir,
-                    "动作未执行，agent-loop 停止",
-                )
+                # context.output = emit_final_output(
+                #     context.goal,
+                #     supervisor.name,
+                #     context.turns,
+                #     log_dir,
+                #     "动作未执行，agent-loop 停止",
+                # )
                 _save_context(context_path, context)
                 return
 
             answer = input("继续下一轮？[Enter继续 / q退出] ").strip().lower()
             if answer in {"q", "quit", "exit"}:
-                context.output = emit_final_output(
-                    context.goal,
-                    supervisor.name,
-                    context.turns,
-                    log_dir,
-                    "用户退出 agent-loop",
-                )
+                # context.output = emit_final_output(
+                #     context.goal,
+                #     supervisor.name,
+                #     context.turns,
+                #     log_dir,
+                #     "用户退出 agent-loop",
+                # )
                 _save_context(context_path, context)
                 return
 

@@ -59,6 +59,19 @@ class SupervisorStep(BaseModel):
     summary: str = Field(description="对当前屏幕状态和任务进展的简要描述")
 
 
+class Milestone(BaseModel):
+    """A sub-goal in the task decomposition DAG."""
+
+    id: str
+    name: str
+    description: str
+    depends_on: list[str] = Field(default_factory=list)
+    success_condition: str
+    failure_hints: list[str] = Field(default_factory=list)
+    status: str = Field(default="pending", description="pending | running | done | failed")
+    retry_count: int = 0
+
+
 class PolicyTurn(BaseModel):
     """One observe-decide-act turn saved in continue mode."""
 
