@@ -10,6 +10,7 @@ from pathlib import Path
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from llm.structured import get_llm_call_count
 from policy_expr.executor import ActionExecutor
 from policy_expr.supervisor import MilestoneSupervisorPolicy, SimpleSupervisorPolicy
 from policy_expr.supervisor.base import SupervisorPolicy
@@ -37,6 +38,8 @@ SUPERVISORS: dict[str, type[SupervisorPolicy]] = {
 
 ROOT = Path(__file__).parent.parent
 POLICY_LOG_ROOT = ROOT / "logs" / "policy_expr"
+TURN_HEADER = "\033[1;36m--- Turn {turn_no} ---\033[0m"
+TURN_STATS = "\033[2mTurn {turn_no} stats: llm_calls={llm_calls}, elapsed={elapsed:.2f}s\033[0m"
 
 
 def create_run_dir(mode: str) -> Path:
@@ -102,6 +105,12 @@ def emit_final_output(
     return output
 
 
+def _print_turn_stats(turn_no: int, started_at: float, llm_calls_before: int) -> None:
+    elapsed = time.perf_counter() - started_at
+    llm_calls = get_llm_call_count() - llm_calls_before
+    print(TURN_STATS.format(turn_no=turn_no, llm_calls=llm_calls, elapsed=elapsed))
+
+
 def run_once(
     prompt: str,
     action_policy: ActionPolicy,
@@ -119,6 +128,9 @@ def run_once(
     print(f"Turns   : {len(context.turns)}")
 
     with LivePhoneSession() as phone:
+        turn_started_at = time.perf_counter()
+        llm_calls_before = get_llm_call_count()
+
         perception = LivePerception(phone, log_dir / "screenshot.png")
         observation = perception.observe()
 
@@ -189,7 +201,7 @@ def run_once(
         #     stop_reason,
         # )
         _save_context(context_path, context)
-        print(f"Context 已保存: {context_path}")
+        _print_turn_stats(1, turn_started_at, llm_calls_before)
 
 
 def run_agent_loop(
@@ -199,6 +211,8 @@ def run_agent_loop(
     input_context_path: Path | None,
     log_dir: Path,
     context_path: Path,
+    max_turns: int = 20,
+    auto_continue: bool = False,
 ) -> None:
     context = _load_context(
         input_context_path or context_path,
@@ -215,7 +229,15 @@ def run_agent_loop(
 
         while True:
             turn_no = len(context.turns) + 1
-            print(f"\n--- Turn {turn_no} ---")
+            if turn_no > max_turns:
+                print(f"\n达到最大轮数 {max_turns}，agent-loop 停止")
+                _save_context(context_path, context)
+                return
+
+            turn_started_at = time.perf_counter()
+            llm_calls_before = get_llm_call_count()
+
+            print("\n" + TURN_HEADER.format(turn_no=turn_no))
 
             perception = LivePerception(phone, log_dir / f"screenshot_turn_{turn_no}.png")
             observation = perception.observe()
@@ -254,7 +276,7 @@ def run_agent_loop(
             )
             context.turns.append(turn)
             _save_context(context_path, context)
-            print(f"Context 已保存: {context_path}")
+            _print_turn_stats(turn_no, turn_started_at, llm_calls_before)
 
             if sv_step.stop or sv_step.goal_completed:
                 reason = sv_step.stop_reason or "目标已达成"
@@ -279,6 +301,14 @@ def run_agent_loop(
                 # )
                 _save_context(context_path, context)
                 return
+
+            if not sv_step.should_act:
+                # milestone 完成 / 未执行动作 → 自动继续下一轮，不暂停
+                continue
+
+            if auto_continue:
+                time.sleep(1.5)
+                continue
 
             answer = input("继续下一轮？[Enter继续 / q退出] ").strip().lower()
             if answer in {"q", "quit", "exit"}:
@@ -324,6 +354,17 @@ def main() -> None:
         type=Path,
         help="agent-loop 可选的 context 加载路径",
     )
+    parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=20,
+        help="agent-loop 最大自动执行轮数，防止无限循环",
+    )
+    parser.add_argument(
+        "--auto-continue",
+        action="store_true",
+        help="agent-loop 动作执行后自动进入下一轮；默认手动确认",
+    )
     args = parser.parse_args()
 
     action_policy = build_policy(args.policy)
@@ -340,7 +381,16 @@ def main() -> None:
             raise ValueError("--context 目前只支持 agent-loop 模式")
         run_once(args.prompt, action_policy, supervisor, log_dir, context_path)
     elif mode == "agent-loop":
-        run_agent_loop(args.prompt, action_policy, supervisor, input_context_path, log_dir, context_path)
+        run_agent_loop(
+            args.prompt,
+            action_policy,
+            supervisor,
+            input_context_path,
+            log_dir,
+            context_path,
+            max_turns=args.max_turns,
+            auto_continue=args.auto_continue,
+        )
 
 
 if __name__ == "__main__":

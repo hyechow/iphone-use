@@ -47,9 +47,9 @@ class SimpleSupervisorPolicy:
         goal: str,
         history: list[PolicyTurn],
     ) -> SupervisorStep:
-        cfg = resolve_llm_config("supervisor.checker")
-        print(f"Checker Provider    : {cfg.provider}")
-        print(f"Checker Model       : {cfg.model}")
+        cfg = resolve_llm_config("supervisor")
+        print(f"Supervisor Provider : {cfg.provider}")
+        print(f"Supervisor Model    : {cfg.model}")
 
         llm = ChatOpenAI(
             model=cfg.model,

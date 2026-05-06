@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import time
+from collections.abc import Callable
 from typing import TypeVar
 
 from langchain_core.messages import BaseMessage, SystemMessage
@@ -10,6 +12,14 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+ReturnT = TypeVar("ReturnT")
+_LLM_CALL_COUNT = 0
+MAX_LLM_TRANSIENT_RETRIES = 2
+
+
+def get_llm_call_count() -> int:
+    """Return the number of LLM API calls made through invoke_structured."""
+    return _LLM_CALL_COUNT
 
 
 def invoke_structured(
@@ -24,15 +34,46 @@ def invoke_structured(
     return nonstandard parse payloads, so fall back to normal JSON text parsing.
     """
     try:
-        return llm.with_structured_output(schema).invoke(messages)
+        return _invoke_counted_with_retry(
+            lambda: llm.with_structured_output(schema).invoke(messages),
+            label="structured output",
+        )
     except TypeError as exc:
         if "'NoneType' object is not iterable" not in str(exc):
             raise
         print("结构化输出解析失败，改用 JSON 文本解析重试...")
 
-    response = llm.invoke(_with_json_instruction(messages, schema))
+    response = _invoke_counted_with_retry(
+        lambda: llm.invoke(_with_json_instruction(messages, schema)),
+        label="json fallback",
+    )
     content = _message_text(response.content)
     return schema.model_validate_json(_extract_json_object(content))
+
+
+def _invoke_counted_with_retry(fn: Callable[[], ReturnT], label: str) -> ReturnT:
+    """Invoke an LLM call, counting attempts and retrying transient bad payloads."""
+
+    global _LLM_CALL_COUNT
+    for attempt in range(MAX_LLM_TRANSIENT_RETRIES + 1):
+        _LLM_CALL_COUNT += 1
+        try:
+            return fn()
+        except TypeError as exc:
+            if not _is_transient_response_error(exc) or attempt >= MAX_LLM_TRANSIENT_RETRIES:
+                raise
+            wait_s = 0.5 * (attempt + 1)
+            print(f"LLM {label} 响应格式异常，{wait_s:.1f}s 后重试...")
+            time.sleep(wait_s)
+    raise RuntimeError("unreachable")
+
+
+def _is_transient_response_error(exc: TypeError) -> bool:
+    text = str(exc)
+    return (
+        "null value for 'choices'" in text
+        or "Received response with null value for 'choices'" in text
+    )
 
 
 def _with_json_instruction(

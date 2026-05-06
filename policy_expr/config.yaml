@@ -2,15 +2,11 @@
 # Leave fields empty to use existing environment-variable defaults.
 llm:
   action_policy:
-    provider: modelscope
-    model: Qwen/Qwen3.5-27B
+    provider: dashscope
+    model: qwen3.5-35b-a3b
   supervisor:
-    checker:
-      provider: modelscope
-      model: Qwen/Qwen3.5-27B
-    planner:
-      provider: modelscope
-      model: Qwen/Qwen3-30B-A3B-Instruct-2507
+    provider: dashscope
+    model: qwen3.5-35b-a3b
   output:
-    provider: modelscope
-    model: Qwen/Qwen3.5-27B
+    provider: dashscope
+    model: qwen3.5-35b-a3b

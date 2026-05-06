@@ -63,7 +63,7 @@ uv run python llm_test.py
 ### 运行模式
 
 - `single-step`：默认模式，只执行一轮 ReAct。未指定 `--context` 时不读取历史；指定后会加载单用户对话上下文，只基于历史执行一步。
-- `agent-loop`：单条用户目标内部的多步 ReAct。未指定 `--context` 时创建新 `PolicyContext`；指定后从该路径加载历史；每轮后手动确认是否继续。
+- `agent-loop`：单条用户目标内部的多步 ReAct。未指定 `--context` 时创建新 `PolicyContext`；指定后从该路径加载历史；每轮后手动确认是否继续。传 `--auto-continue` 时动作执行后自动进入下一轮截图验收，直到目标完成、失败或达到最大轮数。
 - `dialog-loop`：单用户多轮自然语言对话模式。当前仅保留框架，运行时会提示 TODO，尚未完整实现。
 
 每次启动都会创建独立运行目录：`logs/policy_expr/<mode>/<启动时间>/`。本次运行的截图、动作可视化、动作后截图和 `context.json` 都固定保存到该目录；`--context` 只用于指定要加载的历史 context 路径。
@@ -82,6 +82,12 @@ uv run python policy_expr/runner.py "点通讯录" \
 # 单目标内部多步 ReAct
 uv run python policy_expr/runner.py "打开微信并进入通讯录" \
   --mode agent-loop
+
+# 自动继续并限制循环轮数
+uv run python policy_expr/runner.py "打开微信并进入通讯录" \
+  --mode agent-loop \
+  --auto-continue \
+  --max-turns 8
 
 # dialog-loop 目前仅提示 TODO
 uv run python policy_expr/runner.py \

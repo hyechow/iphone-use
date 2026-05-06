@@ -1,15 +1,18 @@
 """Shared schemas for policy experiments."""
 
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
+
+
+ActionType = Literal["tap", "type", "scroll", "home"]
 
 
 class Action(BaseModel):
     """A single phone action in normalized coordinates."""
 
-    action_type: str = Field(
+    action_type: ActionType = Field(
         description="操作类型：tap（纯点击）、type（点击输入框并输入文字）、scroll（滚动）、home（返回主屏幕）之一"
     )
     x: Optional[float] = Field(
