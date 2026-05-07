@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 ActionType = Literal["tap", "type", "scroll", "home"]
@@ -11,6 +11,16 @@ ActionType = Literal["tap", "type", "scroll", "home"]
 
 class Action(BaseModel):
     """A single phone action in normalized coordinates."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _unpack_coords(cls, data: object) -> object:
+        """Unpack x: [x, y] into separate x/y fields (model sometimes uses list coords)."""
+        if isinstance(data, dict):
+            x = data.get("x")
+            if isinstance(x, list) and len(x) == 2 and "y" not in data:
+                return {**data, "x": x[0], "y": x[1]}
+        return data
 
     action_type: ActionType = Field(
         description="操作类型：tap（纯点击）、type（点击输入框并输入文字）、scroll（滚动）、home（返回主屏幕）之一"
@@ -45,6 +55,14 @@ class ActionDecision(BaseModel):
     """Action policy output: the next action to execute."""
 
     action: Action = Field(description="当前应该执行的操作")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _unwrap_flat_action(cls, data: object) -> object:
+        """Accept flat Action fields directly (model forgot the outer wrapper)."""
+        if isinstance(data, dict) and "action_type" in data and "action" not in data:
+            return {"action": data}
+        return data
 
 
 class SupervisorStep(BaseModel):

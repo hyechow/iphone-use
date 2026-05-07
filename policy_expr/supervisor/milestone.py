@@ -1,7 +1,6 @@
 """Milestone-based supervisor: decompose goal → check → plan/replan."""
 
 import base64
-import concurrent.futures
 import io
 import json
 from typing import Optional
@@ -154,7 +153,6 @@ PLAN_PROMPT = """\
 - 如果当前在微信搜索页且搜索框已有光标，搜索类任务应优先指令「输入搜索关键词」
 - 如果当前在微信搜索页但搜索框未聚焦，搜索类任务应指令「点击顶部搜索框」
 - 输入框显示灰色占位文字（placeholder）时，说明输入框为空，直接点击后输入即可，不需要先删除占位文字
-- 需要在输入框中输入内容时，直接给出「在 [元素] 中输入 [内容]」的指令，执行器会自动先点击再输入，不要把「点击」和「输入」拆成两步
 
 输出 JSON：
 - instruction: 下一步精确操作指令
@@ -186,7 +184,6 @@ REPLAN_PROMPT = """\
 - 如果当前在微信搜索页且搜索框已有光标，优先给出单步修复指令「输入搜索关键词」
 - 微信搜索页可能显示「搜索本地或网络结果」「AI搜索」「最近在搜」「页面设置」，这不是 iOS 系统搜索，不要要求退出重开微信
 - 输入框显示灰色占位文字（placeholder）时，说明输入框为空，直接点击后输入即可，不需要先删除占位文字
-- 需要在输入框中输入内容时，直接给出「在 [元素] 中输入 [内容]」的指令，执行器会自动先点击再输入，不要把「点击」和「输入」拆成两步
 
 输出 JSON：
 - diagnosis: 失败根本原因（一句话）
@@ -243,7 +240,6 @@ class MilestoneSupervisorPolicy:
         self._current_id: Optional[str] = None
         self._initialized = False
         self._recent_screenshots: list[bytes] = []  # 用于截图相似度检测
-        self._last_check: Optional[_CheckResult] = None  # 上一轮 checker 结果（供 planner 使用）
 
     def step(
         self,
@@ -267,31 +263,11 @@ class MilestoneSupervisorPolicy:
 
         milestone = self._milestones[self._current_id]
 
-        # ── Checker + Planner (speculative parallel) ──
+        # ── Checker: evaluate milestone progress only ──
         # 硬逻辑兜底：截图无变化 / 指令循环 → 直接判 stuck，跳过 LLM
         sim_stuck = self._check_screen_similarity(observation)
         rep_stuck = self._check_instruction_repetition(history) if not sim_stuck else None
-
-        plan_check = self._last_check or _CheckResult(
-            status="in_progress",
-            reason="首轮规划，无上一轮验收信息",
-            summary="",
-        )
-        speculative_plan: Optional[_PlanResult] = None
-
-        if sim_stuck or rep_stuck:
-            check = sim_stuck or rep_stuck
-        else:
-            # Speculative parallel: Checker + Planner run concurrently.
-            # Planner uses last turn's check (decoupled), no need to wait for current checker.
-            _ex = concurrent.futures.ThreadPoolExecutor(max_workers=2)
-            _cf = _ex.submit(self._check, milestone, observation, history)
-            _pf = _ex.submit(self._plan, milestone, plan_check, observation, history)
-            _ex.shutdown(wait=False)
-            check = _cf.result()
-            if check.status == "in_progress":
-                speculative_plan = _pf.result()
-
+        check = sim_stuck or rep_stuck or self._check(milestone, observation, history)
         print(f"  [Checker] {check.status}: {check.reason}")
 
         if check.status == "done":
@@ -299,7 +275,6 @@ class MilestoneSupervisorPolicy:
             milestone.status = "done"
             self._current_id = self._next_milestone()
             self._recent_screenshots.clear()
-            self._last_check = None  # 新 milestone 从零开始
             print(f"  子目标「{done_name}」已完成")
 
             if self._current_id is None:
@@ -383,7 +358,6 @@ class MilestoneSupervisorPolicy:
                 )
 
             milestone.status = "running"
-            self._last_check = check
             return SupervisorStep(
                 should_act=bool(replan.instruction),
                 instruction=replan.instruction or None,
@@ -395,13 +369,13 @@ class MilestoneSupervisorPolicy:
                 ),
             )
 
-        # in_progress ── use speculative plan from parallel execution ──
-        plan = speculative_plan or self._plan(milestone, plan_check, observation, history)
+        # in_progress ── Planner generates the next single-step instruction ──
+        plan = self._plan(milestone, check, observation, history)
         if self._instruction_looks_like_sequence(plan.instruction):
             print("  [Planner] instruction 是多步序列，重试生成单步指令...")
             plan = self._plan(
                 milestone,
-                plan_check,
+                check,
                 observation,
                 history,
                 extra_instruction=(
@@ -411,7 +385,6 @@ class MilestoneSupervisorPolicy:
             )
         print(f"  [Planner] instruction: {plan.instruction}")
         milestone.status = "running"
-        self._last_check = check
         return SupervisorStep(
             should_act=bool(plan.instruction),
             instruction=plan.instruction or None,

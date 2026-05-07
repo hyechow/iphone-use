@@ -48,7 +48,7 @@ def invoke_structured(
         content = _message_text(response.content)
         return schema.model_validate_json(_extract_json_object(content))
     except (BadRequestError, ValidationError, ValueError) as exc:
-        print(f"json_object 模式失败（{type(exc).__name__}），改用纯文本 JSON 解析...")
+        print(f"json_object 模式失败（{type(exc).__name__}）: {exc}，改用纯文本 JSON 解析...")
 
     # Fallback: plain text, let model output JSON freely
     response = _invoke_counted_with_retry(
