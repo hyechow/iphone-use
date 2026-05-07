@@ -310,7 +310,10 @@ def run_agent_loop(
                 time.sleep(1.5)
                 continue
 
-            answer = input("继续下一轮？[Enter继续 / q退出] ").strip().lower()
+            try:
+                answer = input("继续下一轮？[Enter继续 / q退出] ").strip().lower()
+            except EOFError:
+                answer = ""
             if answer in {"q", "quit", "exit"}:
                 # context.output = emit_final_output(
                 #     context.goal,

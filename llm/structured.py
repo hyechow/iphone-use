@@ -9,7 +9,8 @@ from typing import TypeVar
 
 from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel
+from openai import BadRequestError
+from pydantic import BaseModel, ValidationError
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
 ReturnT = TypeVar("ReturnT")
@@ -29,23 +30,30 @@ def invoke_structured(
 ) -> ModelT:
     """Invoke a chat model and parse a Pydantic object.
 
-    LangChain's native structured-output parser is preferable when the provider
-    implements the same response shape as OpenAI. Some compatible providers can
-    return nonstandard parse payloads, so fall back to normal JSON text parsing.
+    Uses DashScope json_object constrained decoding with thinking disabled.
+    Falls back to plain JSON text parsing if the constrained mode fails.
     """
-    try:
-        return _invoke_counted_with_retry(
-            lambda: llm.with_structured_output(schema).invoke(messages),
-            label="structured output",
-        )
-    except TypeError as exc:
-        if "'NoneType' object is not iterable" not in str(exc):
-            raise
-        print("结构化输出解析失败，改用 JSON 文本解析重试...")
+    msgs = _with_json_instruction(messages, schema)
 
+    # Primary: json_object mode (constrained decoding) + disable thinking
+    bound = llm.bind(
+        response_format={"type": "json_object"},
+        extra_body={"enable_thinking": False},
+    )
+    try:
+        response = _invoke_counted_with_retry(
+            lambda: bound.invoke(msgs),
+            label="json_object",
+        )
+        content = _message_text(response.content)
+        return schema.model_validate_json(_extract_json_object(content))
+    except (BadRequestError, ValidationError, ValueError) as exc:
+        print(f"json_object 模式失败（{type(exc).__name__}），改用纯文本 JSON 解析...")
+
+    # Fallback: plain text, let model output JSON freely
     response = _invoke_counted_with_retry(
-        lambda: llm.invoke(_with_json_instruction(messages, schema)),
-        label="json fallback",
+        lambda: llm.invoke(msgs),
+        label="json text fallback",
     )
     content = _message_text(response.content)
     return schema.model_validate_json(_extract_json_object(content))
@@ -80,16 +88,16 @@ def _with_json_instruction(
     messages: list[BaseMessage],
     schema: type[BaseModel],
 ) -> list[BaseMessage]:
-    instruction = SystemMessage(
-        content=(
-            "你必须只返回一个 JSON 对象，不要使用 Markdown，不要输出额外说明。\n"
-            "JSON 必须符合以下 schema：\n"
-            f"{json.dumps(schema.model_json_schema(), ensure_ascii=False)}"
-        )
+    """Merge JSON schema instruction into the system message (or prepend one)."""
+    instruction = (
+        "你必须只返回一个 JSON 对象，不要使用 Markdown，不要输出额外说明。\n"
+        "JSON 必须符合以下 schema：\n"
+        f"{json.dumps(schema.model_json_schema(), ensure_ascii=False)}"
     )
     if messages and isinstance(messages[0], SystemMessage):
-        return [messages[0], instruction, *messages[1:]]
-    return [instruction, *messages]
+        merged = SystemMessage(content=f"{messages[0].content}\n\n{instruction}")
+        return [merged, *messages[1:]]
+    return [SystemMessage(content=instruction), *messages]
 
 
 def _message_text(content: object) -> str:
