@@ -24,4 +24,5 @@ dependencies = [
     "rich>=13.0.0",
     "prompt-toolkit>=3.0.52",
     "langchain-qwq>=0.3.4",
+    "pymobiledevice3>=9.12.0",
 ]

@@ -11,6 +11,7 @@ from policy_expr.schemas import Action, ActionDecision
 
 WIN_W = 318
 WIN_H = 701
+WIN_H_TAP_MAX = WIN_H - 20   # 避开底部 Home 指示条安全区（约 20px）
 SCROLL_DIFF_THRESHOLD = 8.0
 
 
@@ -26,7 +27,8 @@ class ActionExecutor:
 
         if action.action_type == "tap" and action.x is not None and action.y is not None:
             lx, ly = logical_xy(action.x, action.y)
-            self._tap(lx, ly, decision, app_name)
+            if not self._tap(lx, ly, decision, app_name):
+                return False
 
         elif (
             action.action_type == "type"
@@ -35,7 +37,8 @@ class ActionExecutor:
             and action.text
         ):
             lx, ly = logical_xy(action.x, action.y)
-            self._tap(lx, ly, decision, app_name)
+            if not self._tap(lx, ly, decision, app_name):
+                return False
             time.sleep(0.5)
             print(f"输入文字: {action.text!r}")
             paste_text(action.text)
@@ -58,7 +61,7 @@ class ActionExecutor:
 
         return True
 
-    def _tap(self, lx: float, ly: float, decision: ActionDecision, app_name: str = "") -> None:
+    def _tap(self, lx: float, ly: float, decision: ActionDecision, app_name: str = "") -> bool:
         action = decision.action
         in_wechat = app_name.strip() in ("微信", "WeChat")
         in_bottom_right = bool(action.x and action.y and action.x > 700 and action.y > 800)
@@ -68,6 +71,10 @@ class ActionExecutor:
         print(f"执行点击: ({lx:.0f}, {ly:.0f})")
         result = self._client().tap(lx, ly)
         print(f"结果: {result}")
+        if "interrupted" in result.lower() or "failed" in result.lower():
+            print("点击失败：落点在窗口外或操作被中断，跳过")
+            return False
+        return True
 
     def _scroll(self, action: Action) -> None:
         direction = (action.direction or "").strip().lower()
@@ -106,7 +113,7 @@ def logical_xy(ax: float, ay: float) -> tuple[float, float]:
 
     x = ax / 1000 * WIN_W
     y = ay / 1000 * WIN_H
-    return clamp(x, 0, WIN_W - 1), clamp(y, 0, WIN_H - 1)
+    return clamp(x, 0, WIN_W - 1), clamp(y, 0, WIN_H_TAP_MAX)
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -125,6 +132,9 @@ def scroll_gestures(direction: str) -> list[tuple[str, tuple[float, float, float
     right_safe_x = WIN_W * 0.88
     upper_y = WIN_H * 0.33
     lower_y = WIN_H * 0.87
+    center_y = WIN_H * 0.50
+    left_x = WIN_W * 0.12
+    right_x = WIN_W * 0.88
 
     if direction in ("up", "向上", "upward"):
         return [
@@ -140,4 +150,14 @@ def scroll_gestures(direction: str) -> list[tuple[str, tuple[float, float, float
             ("drag", (center_x, upper_y, center_x, lower_y, 1600)),
             ("drag", (right_safe_x, upper_y, right_safe_x, lower_y, 1800)),
         ]
-    raise ValueError("scroll direction must be up or down")
+    if direction in ("left", "向左", "leftward"):
+        return [
+            ("swipe", (right_x, center_y, left_x, center_y, 600)),
+            ("drag",  (right_x, center_y, left_x, center_y, 1200)),
+        ]
+    if direction in ("right", "向右", "rightward"):
+        return [
+            ("swipe", (left_x, center_y, right_x, center_y, 600)),
+            ("drag",  (left_x, center_y, right_x, center_y, 1200)),
+        ]
+    raise ValueError(f"scroll direction must be up/down/left/right, got: {direction!r}")

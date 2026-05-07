@@ -10,6 +10,9 @@ from pathlib import Path
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from llm.structured import get_llm_call_count
 from policy_expr.executor import ActionExecutor, mean_image_diff
 from policy_expr.supervisor import MilestoneSupervisorPolicy, SimpleSupervisorPolicy
@@ -196,13 +199,13 @@ def run_once(
         else:
             stop_reason = "动作未执行，single-step 停止"
 
-        # context.output = emit_final_output(
-        #     context.goal,
-        #     supervisor.name,
-        #     context.turns,
-        #     log_dir,
-        #     stop_reason,
-        # )
+        context.output = emit_final_output(
+            context.goal,
+            supervisor.name,
+            context.turns,
+            log_dir,
+            stop_reason,
+        )
         _save_context(context_path, context)
         _print_turn_stats(1, turn_started_at, llm_calls_before)
 
@@ -279,12 +282,21 @@ def run_agent_loop(
                     )
                     executed = executor.execute(action_decision, app_name=sv_step.app_name or "")
 
-                    if not executed or attempt >= MAX_ACTION_RETRIES:
+                    if attempt >= MAX_ACTION_RETRIES:
                         break
+
+                    if not executed:
+                        # 点击落在窗口外或被中断，直接重试
+                        print(f"  [重试 {attempt + 1}/{MAX_ACTION_RETRIES}] 点击未命中窗口，重新决策...")
+                        continue
 
                     # 等 UI 响应后检查动作是否生效
                     time.sleep(0.8)
-                    post_png = phone.screenshot()
+                    try:
+                        post_png = phone.screenshot()
+                    except RuntimeError as e:
+                        print(f"  [效果检测] 截图失败（{e}），视为已生效，跳过重试")
+                        break
                     diff = mean_image_diff(action_obs.png_bytes, post_png)
                     print(f"  [效果检测] mean_diff={diff:.2f}", end="")
                     if diff >= ACTION_EFFECT_THRESHOLD:
@@ -313,24 +325,24 @@ def run_agent_loop(
             if sv_step.stop or sv_step.goal_completed:
                 reason = sv_step.stop_reason or "目标已达成"
                 print(f"\n目标已达成：{reason}")
-                # context.output = emit_final_output(
-                #     context.goal,
-                #     supervisor.name,
-                #     context.turns,
-                #     log_dir,
-                #     reason,
-                # )
+                context.output = emit_final_output(
+                    context.goal,
+                    supervisor.name,
+                    context.turns,
+                    log_dir,
+                    reason,
+                )
                 _save_context(context_path, context)
                 return
 
             if not executed and sv_step.should_act:
-                # context.output = emit_final_output(
-                #     context.goal,
-                #     supervisor.name,
-                #     context.turns,
-                #     log_dir,
-                #     "动作未执行，agent-loop 停止",
-                # )
+                context.output = emit_final_output(
+                    context.goal,
+                    supervisor.name,
+                    context.turns,
+                    log_dir,
+                    "动作未执行，agent-loop 停止",
+                )
                 _save_context(context_path, context)
                 return
 
@@ -347,13 +359,13 @@ def run_agent_loop(
             except EOFError:
                 answer = ""
             if answer in {"q", "quit", "exit"}:
-                # context.output = emit_final_output(
-                #     context.goal,
-                #     supervisor.name,
-                #     context.turns,
-                #     log_dir,
-                #     "用户退出 agent-loop",
-                # )
+                context.output = emit_final_output(
+                    context.goal,
+                    supervisor.name,
+                    context.turns,
+                    log_dir,
+                    "用户退出 agent-loop",
+                )
                 _save_context(context_path, context)
                 return
 
