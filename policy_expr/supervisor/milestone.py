@@ -1,6 +1,7 @@
 """Milestone-based supervisor: decompose goal → check → plan/replan."""
 
 import base64
+import concurrent.futures
 import io
 import json
 from typing import Optional
@@ -266,11 +267,31 @@ class MilestoneSupervisorPolicy:
 
         milestone = self._milestones[self._current_id]
 
-        # ── Checker: evaluate milestone progress only ──
+        # ── Checker + Planner (speculative parallel) ──
         # 硬逻辑兜底：截图无变化 / 指令循环 → 直接判 stuck，跳过 LLM
         sim_stuck = self._check_screen_similarity(observation)
         rep_stuck = self._check_instruction_repetition(history) if not sim_stuck else None
-        check = sim_stuck or rep_stuck or self._check(milestone, observation, history)
+
+        plan_check = self._last_check or _CheckResult(
+            status="in_progress",
+            reason="首轮规划，无上一轮验收信息",
+            summary="",
+        )
+        speculative_plan: Optional[_PlanResult] = None
+
+        if sim_stuck or rep_stuck:
+            check = sim_stuck or rep_stuck
+        else:
+            # Speculative parallel: Checker + Planner run concurrently.
+            # Planner uses last turn's check (decoupled), no need to wait for current checker.
+            _ex = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+            _cf = _ex.submit(self._check, milestone, observation, history)
+            _pf = _ex.submit(self._plan, milestone, plan_check, observation, history)
+            _ex.shutdown(wait=False)
+            check = _cf.result()
+            if check.status == "in_progress":
+                speculative_plan = _pf.result()
+
         print(f"  [Checker] {check.status}: {check.reason}")
 
         if check.status == "done":
@@ -374,13 +395,8 @@ class MilestoneSupervisorPolicy:
                 ),
             )
 
-        # in_progress ── Planner uses last turn's check to decouple from current checker ──
-        plan_check = self._last_check or _CheckResult(
-            status="in_progress",
-            reason="首轮规划，无上一轮验收信息",
-            summary="",
-        )
-        plan = self._plan(milestone, plan_check, observation, history)
+        # in_progress ── use speculative plan from parallel execution ──
+        plan = speculative_plan or self._plan(milestone, plan_check, observation, history)
         if self._instruction_looks_like_sequence(plan.instruction):
             print("  [Planner] instruction 是多步序列，重试生成单步指令...")
             plan = self._plan(
