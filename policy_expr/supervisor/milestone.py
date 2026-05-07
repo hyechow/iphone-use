@@ -1,8 +1,11 @@
 """Milestone-based supervisor: decompose goal → check → plan/replan."""
 
 import base64
+import io
 import json
 from typing import Optional
+
+from PIL import Image
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -17,6 +20,10 @@ from policy_expr.schemas import Milestone, Observation, PolicyTurn, SupervisorSt
 load_dotenv()
 
 MAX_RETRIES = 3
+STUCK_SCREEN_WINDOW = 3           # 连续几帧截图相似才触发
+STUCK_SCREEN_SIMILARITY = 0.95    # 像素相似度阈值（0~1）
+STUCK_REPEAT_WINDOW = 3           # 连续几步指令相似才触发
+STUCK_REPEAT_CHAR_OVERLAP = 0.70  # 指令字符集重叠阈值（0~1）
 
 # ── LLM response schemas ──────────────────────────────────────────────
 
@@ -230,6 +237,7 @@ class MilestoneSupervisorPolicy:
         self._order: list[str] = []
         self._current_id: Optional[str] = None
         self._initialized = False
+        self._recent_screenshots: list[bytes] = []  # 用于截图相似度检测
 
     def step(
         self,
@@ -254,12 +262,16 @@ class MilestoneSupervisorPolicy:
         milestone = self._milestones[self._current_id]
 
         # ── Checker: evaluate milestone progress only ──
-        check = self._check(milestone, observation, history)
+        # 硬逻辑兜底：截图无变化 / 指令循环 → 直接判 stuck，跳过 LLM
+        sim_stuck = self._check_screen_similarity(observation)
+        rep_stuck = self._check_instruction_repetition(history) if not sim_stuck else None
+        check = sim_stuck or rep_stuck or self._check(milestone, observation, history)
         print(f"  [Checker] {check.status}: {check.reason}")
 
         if check.status == "done":
             milestone.status = "done"
             self._current_id = self._next_milestone()
+            self._recent_screenshots.clear()
             print(f"  子目标「{milestone.name}」已完成")
 
             if self._current_id is None:
@@ -277,6 +289,7 @@ class MilestoneSupervisorPolicy:
             return next_step
 
         if check.status == "stuck":
+            self._recent_screenshots.clear()  # replan 后给新策略干净的窗口
             milestone.retry_count += 1
 
             if milestone.retry_count >= MAX_RETRIES:
@@ -402,6 +415,69 @@ class MilestoneSupervisorPolicy:
                 for dep in m.depends_on
             ):
                 return mid
+        return None
+
+    def _check_screen_similarity(self, observation: Observation) -> Optional[_CheckResult]:
+        """若最近 STUCK_SCREEN_WINDOW 帧截图高度相似，直接返回 stuck，否则返回 None。"""
+        self._recent_screenshots.append(observation.png_bytes)
+        if len(self._recent_screenshots) > STUCK_SCREEN_WINDOW:
+            self._recent_screenshots.pop(0)
+
+        if len(self._recent_screenshots) < STUCK_SCREEN_WINDOW:
+            return None
+
+        current = self._recent_screenshots[-1]
+        sims = [
+            _png_similarity(current, prev)
+            for prev in self._recent_screenshots[:-1]
+        ]
+        if all(s >= STUCK_SCREEN_SIMILARITY for s in sims):
+            sim_str = ", ".join(f"{s:.2%}" for s in sims)
+            print(f"  [Similarity] {sim_str} → 截图连续无变化，判为 stuck")
+            return _CheckResult(
+                status="stuck",
+                reason=f"连续 {STUCK_SCREEN_WINDOW} 帧截图相似度 [{sim_str}]，屏幕无实质变化",
+                stuck_reason="连续帧高度相似，上一步操作未生效",
+                issues=["屏幕像素变化低于阈值"],
+                visible_evidence=[],
+                missing_evidence=[],
+                summary="屏幕连续无变化",
+            )
+        return None
+
+    def _check_instruction_repetition(
+        self, history: list[PolicyTurn],
+    ) -> Optional[_CheckResult]:
+        """若最近 STUCK_REPEAT_WINDOW 步的 supervisor 指令字符集高度重叠，直接返回 stuck。"""
+        if len(history) < STUCK_REPEAT_WINDOW:
+            return None
+
+        recent = history[-STUCK_REPEAT_WINDOW:]
+        instructions = [
+            t.supervisor.instruction
+            for t in recent
+            if t.supervisor and t.supervisor.instruction
+        ]
+        if len(instructions) < STUCK_REPEAT_WINDOW:
+            return None
+
+        base = set(instructions[-1])
+        sims = [
+            len(base & set(inst)) / max(len(base), len(set(inst)), 1)
+            for inst in instructions[:-1]
+        ]
+        if all(s >= STUCK_REPEAT_CHAR_OVERLAP for s in sims):
+            sim_str = ", ".join(f"{s:.2%}" for s in sims)
+            print(f"  [Repetition] {sim_str} → 指令连续重复，判为 stuck")
+            return _CheckResult(
+                status="stuck",
+                reason=f"连续 {STUCK_REPEAT_WINDOW} 步指令字符重叠 [{sim_str}]，操作策略未变化",
+                stuck_reason="连续相似指令，重复操作未生效",
+                issues=["supervisor 指令持续重复"],
+                visible_evidence=[],
+                missing_evidence=[],
+                summary="操作陷入重复循环",
+            )
         return None
 
     def _check(
@@ -550,3 +626,17 @@ class MilestoneSupervisorPolicy:
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
             ]),
         ]
+
+
+def _png_similarity(png1: bytes, png2: bytes, size: int = 64) -> float:
+    """Return pixel-level similarity between two PNGs (0=different, 1=identical).
+
+    Both images are converted to grayscale and resized to `size`×`size` before
+    comparison, so the result is resolution-independent and fast.
+    """
+    img1 = Image.open(io.BytesIO(png1)).convert("L").resize((size, size))
+    img2 = Image.open(io.BytesIO(png2)).convert("L").resize((size, size))
+    pixels1 = img1.getdata()
+    pixels2 = img2.getdata()
+    total_diff = sum(abs(int(a) - int(b)) for a, b in zip(pixels1, pixels2))
+    return 1.0 - total_diff / (255 * size * size)
