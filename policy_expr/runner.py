@@ -317,6 +317,7 @@ def run_agent_loop(
                 ),
                 action_decision=action_decision,
                 executed=executed,
+                llm_calls=get_llm_call_count() - llm_calls_before,
             )
             context.turns.append(turn)
             _save_context(context_path, context)

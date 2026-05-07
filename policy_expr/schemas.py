@@ -84,6 +84,7 @@ class PolicyTurn(BaseModel):
     supervisor: SupervisorStep
     action_decision: Optional[ActionDecision] = None
     executed: bool = False
+    llm_calls: int = 0
 
 
 class PolicyContext(BaseModel):

@@ -152,6 +152,7 @@ PLAN_PROMPT = """\
 - 微信搜索页可能显示「搜索本地或网络结果」「AI搜索」「最近在搜」「页面设置」，这仍然是微信内搜索页，不要要求退出重开微信
 - 如果当前在微信搜索页且搜索框已有光标，搜索类任务应优先指令「输入搜索关键词」
 - 如果当前在微信搜索页但搜索框未聚焦，搜索类任务应指令「点击顶部搜索框」
+- 输入框显示灰色占位文字（placeholder）时，说明输入框为空，直接点击后输入即可，不需要先删除占位文字
 
 输出 JSON：
 - instruction: 下一步精确操作指令
@@ -182,6 +183,7 @@ REPLAN_PROMPT = """\
 - instruction 必须只包含一个可执行操作，不能输出编号列表、操作序列或多个步骤
 - 如果当前在微信搜索页且搜索框已有光标，优先给出单步修复指令「输入搜索关键词」
 - 微信搜索页可能显示「搜索本地或网络结果」「AI搜索」「最近在搜」「页面设置」，这不是 iOS 系统搜索，不要要求退出重开微信
+- 输入框显示灰色占位文字（placeholder）时，说明输入框为空，直接点击后输入即可，不需要先删除占位文字
 
 输出 JSON：
 - diagnosis: 失败根本原因（一句话）
@@ -269,10 +271,11 @@ class MilestoneSupervisorPolicy:
         print(f"  [Checker] {check.status}: {check.reason}")
 
         if check.status == "done":
+            done_name = milestone.name
             milestone.status = "done"
             self._current_id = self._next_milestone()
             self._recent_screenshots.clear()
-            print(f"  子目标「{milestone.name}」已完成")
+            print(f"  子目标「{done_name}」已完成")
 
             if self._current_id is None:
                 return SupervisorStep(
@@ -280,13 +283,25 @@ class MilestoneSupervisorPolicy:
                     stop=True,
                     stop_reason="所有子目标已完成",
                     goal_completed=True,
-                    summary=f"子目标「{milestone.name}」已完成，任务全部完成。",
+                    summary=f"子目标「{done_name}」已完成，任务全部完成。",
                 )
-            next_step = self.step(observation, goal, history)
-            next_step.summary = (
-                f"子目标「{milestone.name}」已完成。{next_step.summary}"
+
+            # 直接为新 milestone 规划第一步，下一轮再让 checker 验收
+            next_ms = self._milestones[self._current_id]
+            synthetic_check = _CheckResult(
+                status="in_progress",
+                reason=f"子目标「{done_name}」已完成，开始执行「{next_ms.name}」",
+                summary=check.summary,
             )
-            return next_step
+            plan = self._plan(next_ms, synthetic_check, observation, history)
+            next_ms.status = "running"
+            return SupervisorStep(
+                should_act=bool(plan.instruction),
+                instruction=plan.instruction or None,
+                stop=False,
+                goal_completed=False,
+                summary=f"子目标「{done_name}」已完成。{plan.summary}",
+            )
 
         if check.status == "stuck":
             self._recent_screenshots.clear()  # replan 后给新策略干净的窗口
