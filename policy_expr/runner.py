@@ -262,15 +262,13 @@ def run_agent_loop(
                 action_decision = None
                 executed = False
 
+                retry_hint = ""
                 for attempt in range(MAX_ACTION_RETRIES + 1):
                     if attempt > 0:
-                        # 取最新截图，附加未命中提示
+                        # 取最新截图，附加针对性重试提示
                         new_png = phone.screenshot()
                         action_obs = Observation(png_bytes=new_png, source="live")
-                        instruction = (
-                            f"{sv_step.instruction}\n\n"
-                            "注意：上次点击可能未命中目标，请仔细核对截图中的元素位置后重新确定坐标。"
-                        )
+                        instruction = f"{sv_step.instruction}\n\n{retry_hint}"
                         print(f"  [重试 {attempt}/{MAX_ACTION_RETRIES}] 重新决策动作...")
 
                     print("动作决策中...")
@@ -286,7 +284,8 @@ def run_agent_loop(
                         break
 
                     if not executed:
-                        # 点击落在窗口外或被中断，直接重试
+                        # 点击落在窗口外或被中断
+                        retry_hint = "注意：上次点击落在窗口外或被中断，请重新核对坐标确保落在屏幕范围内。"
                         print(f"  [重试 {attempt + 1}/{MAX_ACTION_RETRIES}] 点击未命中窗口，重新决策...")
                         continue
 
@@ -302,6 +301,18 @@ def run_agent_loop(
                     if diff >= ACTION_EFFECT_THRESHOLD:
                         print(" → 生效")
                         break
+                    # 动作执行了但屏幕无变化，给出针对性提示
+                    act = action_decision.action
+                    if act.action_type == "tap":
+                        retry_hint = (
+                            f"注意：上次 tap({act.x},{act.y}) 已执行但屏幕无明显变化（diff={diff:.2f}）。"
+                            "如果目标是输入框请改用 type 操作；如果是按钮请确认坐标是否准确。"
+                        )
+                    else:
+                        retry_hint = (
+                            f"注意：上次 {act.action_type} 已执行但屏幕无明显变化（diff={diff:.2f}）。"
+                            "请换一种操作方式或调整参数。"
+                        )
                     print(f" → 未生效（< {ACTION_EFFECT_THRESHOLD}），重试")
 
             turn = PolicyTurn(

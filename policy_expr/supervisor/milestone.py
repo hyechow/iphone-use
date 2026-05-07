@@ -153,6 +153,7 @@ PLAN_PROMPT = """\
 - 如果当前在微信搜索页且搜索框已有光标，搜索类任务应优先指令「输入搜索关键词」
 - 如果当前在微信搜索页但搜索框未聚焦，搜索类任务应指令「点击顶部搜索框」
 - 输入框显示灰色占位文字（placeholder）时，说明输入框为空，直接点击后输入即可，不需要先删除占位文字
+- 需要在输入框中输入内容时，直接给出「在 [元素] 中输入 [内容]」的指令，执行器会自动先点击再输入，不要把「点击」和「输入」拆成两步
 
 输出 JSON：
 - instruction: 下一步精确操作指令
@@ -184,6 +185,7 @@ REPLAN_PROMPT = """\
 - 如果当前在微信搜索页且搜索框已有光标，优先给出单步修复指令「输入搜索关键词」
 - 微信搜索页可能显示「搜索本地或网络结果」「AI搜索」「最近在搜」「页面设置」，这不是 iOS 系统搜索，不要要求退出重开微信
 - 输入框显示灰色占位文字（placeholder）时，说明输入框为空，直接点击后输入即可，不需要先删除占位文字
+- 需要在输入框中输入内容时，直接给出「在 [元素] 中输入 [内容]」的指令，执行器会自动先点击再输入，不要把「点击」和「输入」拆成两步
 
 输出 JSON：
 - diagnosis: 失败根本原因（一句话）
@@ -240,6 +242,7 @@ class MilestoneSupervisorPolicy:
         self._current_id: Optional[str] = None
         self._initialized = False
         self._recent_screenshots: list[bytes] = []  # 用于截图相似度检测
+        self._last_check: Optional[_CheckResult] = None  # 上一轮 checker 结果（供 planner 使用）
 
     def step(
         self,
@@ -275,6 +278,7 @@ class MilestoneSupervisorPolicy:
             milestone.status = "done"
             self._current_id = self._next_milestone()
             self._recent_screenshots.clear()
+            self._last_check = None  # 新 milestone 从零开始
             print(f"  子目标「{done_name}」已完成")
 
             if self._current_id is None:
@@ -358,6 +362,7 @@ class MilestoneSupervisorPolicy:
                 )
 
             milestone.status = "running"
+            self._last_check = check
             return SupervisorStep(
                 should_act=bool(replan.instruction),
                 instruction=replan.instruction or None,
@@ -369,13 +374,18 @@ class MilestoneSupervisorPolicy:
                 ),
             )
 
-        # in_progress ── Planner generates the next single-step instruction ──
-        plan = self._plan(milestone, check, observation, history)
+        # in_progress ── Planner uses last turn's check to decouple from current checker ──
+        plan_check = self._last_check or _CheckResult(
+            status="in_progress",
+            reason="首轮规划，无上一轮验收信息",
+            summary="",
+        )
+        plan = self._plan(milestone, plan_check, observation, history)
         if self._instruction_looks_like_sequence(plan.instruction):
             print("  [Planner] instruction 是多步序列，重试生成单步指令...")
             plan = self._plan(
                 milestone,
-                check,
+                plan_check,
                 observation,
                 history,
                 extra_instruction=(
@@ -385,6 +395,7 @@ class MilestoneSupervisorPolicy:
             )
         print(f"  [Planner] instruction: {plan.instruction}")
         milestone.status = "running"
+        self._last_check = check
         return SupervisorStep(
             should_act=bool(plan.instruction),
             instruction=plan.instruction or None,
