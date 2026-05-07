@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from llm.structured import get_llm_call_count
-from policy_expr.executor import ActionExecutor, mean_image_diff
+from policy_expr.executor import ActionExecutor
 from policy_expr.supervisor import MilestoneSupervisorPolicy, SimpleSupervisorPolicy
 from policy_expr.supervisor.base import SupervisorPolicy
 from policy_expr.output import render_final_output
@@ -44,8 +44,9 @@ POLICY_LOG_ROOT = ROOT / "logs" / "policy_expr"
 TURN_HEADER = "\033[1;36m--- Turn {turn_no} ---\033[0m"
 TURN_STATS = "\033[2mTurn {turn_no} stats: llm_calls={llm_calls}, elapsed={elapsed:.2f}s\033[0m"
 
-MAX_ACTION_RETRIES = 2        # 动作无效时最多重试次数
-ACTION_EFFECT_THRESHOLD = 3.0  # mean_image_diff 低于此值视为动作未生效
+# 动作重试机制暂时关闭：每轮只做一次 action policy 决策和执行。
+# MAX_ACTION_RETRIES = 2        # 动作无效时最多重试次数
+# ACTION_EFFECT_THRESHOLD = 3.0  # mean_image_diff 低于此值视为动作未生效
 
 
 def create_run_dir(mode: str) -> Path:
@@ -257,63 +258,14 @@ def run_agent_loop(
 
             if sv_step.should_act:
                 print(f"动作指令: {sv_step.instruction}")
-                action_obs = observation
-                instruction = sv_step.instruction
-                action_decision = None
-                executed = False
-
-                retry_hint = ""
-                for attempt in range(MAX_ACTION_RETRIES + 1):
-                    if attempt > 0:
-                        # 取最新截图，附加针对性重试提示
-                        new_png = phone.screenshot()
-                        action_obs = Observation(png_bytes=new_png, source="live")
-                        instruction = f"{sv_step.instruction}\n\n{retry_hint}"
-                        print(f"  [重试 {attempt}/{MAX_ACTION_RETRIES}] 重新决策动作...")
-
-                    print("动作决策中...")
-                    action_decision = action_policy.decide(action_obs, instruction)
-                    print_decision(
-                        action_decision,
-                        action_obs.png_bytes,
-                        log_dir / f"structured_output_result_turn_{turn_no}.png",
-                    )
-                    executed = executor.execute(action_decision, app_name=sv_step.app_name or "")
-
-                    if attempt >= MAX_ACTION_RETRIES:
-                        break
-
-                    if not executed:
-                        # 点击落在窗口外或被中断
-                        retry_hint = "注意：上次点击落在窗口外或被中断，请重新核对坐标确保落在屏幕范围内。"
-                        print(f"  [重试 {attempt + 1}/{MAX_ACTION_RETRIES}] 点击未命中窗口，重新决策...")
-                        continue
-
-                    # 等 UI 响应后检查动作是否生效
-                    time.sleep(0.8)
-                    try:
-                        post_png = phone.screenshot()
-                    except RuntimeError as e:
-                        print(f"  [效果检测] 截图失败（{e}），视为已生效，跳过重试")
-                        break
-                    diff = mean_image_diff(action_obs.png_bytes, post_png)
-                    print(f"  [效果检测] mean_diff={diff:.2f}", end="")
-                    if diff >= ACTION_EFFECT_THRESHOLD:
-                        print(" → 生效")
-                        break
-                    # 动作执行了但屏幕无变化，给出针对性提示
-                    act = action_decision.action
-                    if act.action_type == "tap":
-                        retry_hint = (
-                            f"注意：上次 tap({act.x},{act.y}) 已执行但屏幕无明显变化（diff={diff:.2f}）。"
-                            "如果目标是输入框请改用 type 操作；如果是按钮请确认坐标是否准确。"
-                        )
-                    else:
-                        retry_hint = (
-                            f"注意：上次 {act.action_type} 已执行但屏幕无明显变化（diff={diff:.2f}）。"
-                            "请换一种操作方式或调整参数。"
-                        )
-                    print(f" → 未生效（< {ACTION_EFFECT_THRESHOLD}），重试")
+                print("动作决策中...")
+                action_decision = action_policy.decide(observation, sv_step.instruction)
+                print_decision(
+                    action_decision,
+                    observation.png_bytes,
+                    log_dir / f"structured_output_result_turn_{turn_no}.png",
+                )
+                executed = executor.execute(action_decision, app_name=sv_step.app_name or "")
 
             turn = PolicyTurn(
                 index=turn_no,

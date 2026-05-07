@@ -99,7 +99,7 @@ CHECKER_PROMPT = """\
 
 判断规则：
 - done：屏幕上必须能直接观察到验收条件中描述的具体内容（如看到特定页面标题、特定按钮、特定文字）。如果无法在截图中确认验收条件已满足，应判为 in_progress 而非 done
-- stuck：出现错误弹窗、连续无进展、页面回退、与上一次截图无明显变化
+- stuck：出现错误弹窗、连续无进展、页面回退、与上一次截图无明显变化；或历史记录显示操作陷入循环（同一指令反复失败、或指令在两种模式间交替但均未到达目标）
 - in_progress：正在向目标推进
 - 如果验收条件要求某个页面标题，必须看到顶部标题与验收条件精确匹配；看到其他标题时不能判 done
 - 如果验收条件要求某个底部 tab，必须看到该 tab 被高亮/绿色选中；其他 tab 高亮时不能判 done
@@ -109,6 +109,7 @@ CHECKER_PROMPT = """\
 - 如果当前在微信搜索页但搜索结果/目标内容尚未出现，搜索类子目标应返回 in_progress
 - 如果目标应用已打开但停在不同页面（如聊天详情、发现页），属于 in_progress 而非 stuck
 - 区分「应用未成功启动」和「应用已打开但不在预期页面」两种情况
+- 历史记录格式为「指令 → 操作 → 结果」，若多条记录显示相同指令被执行但结果未变化，或两种指令交替出现但均未推进，应判为 stuck
 - 不要凭感觉判断，只看可观测的事实
 - 不要仅凭历史记录判断完成，必须截图上有对应的视觉证据
 - issues 列出具体观察到的问题
@@ -146,9 +147,14 @@ PLAN_PROMPT = """\
 
 规划规则：
 - 只输出一个当前屏幕马上可执行的单步操作指令，不能输出编号列表、操作序列或多个步骤
+- 如果截图显示验收条件已完全满足、无需任何操作，instruction 返回「停止操作」，action policy 会将其映射为 stop action
 - 描述要操作的具体 UI 元素，如「点击底部导航栏左起第二个通讯录图标」
 - 不要给出目标级指令，如「进入通讯录页面」「完成搜索」
+- 如果当前子目标名称或验收条件明确要求「回到主屏幕 / 返回主屏幕 / 看到主屏幕」，下一步必须指令「按 Home 键返回主屏幕」，不要点击应用内左上角返回按钮
 - 如果当前已在目标应用内但不在正确页面，给出应用内导航指令，不要重复尝试打开已打开的应用
+- 如果当前在 iOS 主屏幕且目标应用图标不可见，不要猜测图标位置，也不要优先左右翻页；应使用系统搜索找应用：如果底部可见「搜索」胶囊按钮，先指令「点击主屏幕底部的搜索按钮」；只有看不到该按钮时才指令「在主屏幕中部向下滑动打开系统搜索」。看到系统搜索框后再指令输入目标应用名称，看到搜索结果后再点击目标应用
+- 如果当前是 iOS 系统搜索页（顶部搜索框、下方显示 Siri 建议/搜索结果/App 图标），打开应用类任务应优先输入或点击搜索结果中的目标应用，不要返回主屏重新找图标
+- 如果当前在应用的子页面（如微信聊天详情页，底部显示输入框工具栏而非导航 tab），下一步应指令「点击左上角返回按钮」回到上一级列表页，而非直接要求点击导航 tab（子页面不显示导航 tab）
 - 微信搜索页可能显示「搜索本地或网络结果」「AI搜索」「最近在搜」「页面设置」，这仍然是微信内搜索页，不要要求退出重开微信
 - 如果当前在微信搜索页且搜索框已有光标，搜索类任务应优先指令「输入搜索关键词」
 - 如果当前在微信搜索页但搜索框未聚焦，搜索类任务应指令「点击顶部搜索框」
@@ -179,6 +185,7 @@ REPLAN_PROMPT = """\
 - 工具限制/数据问题 → local_replan，换一种操作方式
 - 重试次数 >= 3 → escalate_human
 - local_replan 的指令不能重复已失败的方案
+- 如果失败子目标名称或验收条件明确要求「回到主屏幕 / 返回主屏幕 / 看到主屏幕」，local_replan 必须指令「按 Home 键返回主屏幕」；不要继续点击应用内返回按钮，也不要点击搜索、确认、商品等应用内控件
 - 区分「应用未成功启动」和「应用已打开但停在错误页面」，后者应通过应用内导航解决而非重新打开应用
 - instruction 必须只包含一个可执行操作，不能输出编号列表、操作序列或多个步骤
 - 如果当前在微信搜索页且搜索框已有光标，优先给出单步修复指令「输入搜索关键词」
@@ -197,25 +204,37 @@ REPLAN_PROMPT = """\
 
 
 def _format_history(history: list[PolicyTurn]) -> str:
+    """格式：指令 → 执行动作 → 动作结果（下一轮屏幕状态）。
+
+    每条记录包含三个关键信息：
+    - 指令：supervisor 要求 action policy 做什么
+    - 操作：action policy 实际执行了什么（可能与指令不一致）
+    - 结果：执行后屏幕变成什么状态（取自下一轮 supervisor.summary）
+    """
     if not history:
         return "（无历史记录，这是第一轮）"
 
+    recent = history[-8:]
     lines = []
-    for turn in history[-8:]:
+    for idx, turn in enumerate(recent):
         sv = turn.supervisor
+        # 结果 = 下一轮的屏幕摘要（即本轮动作执行后的屏幕状态）
+        result = recent[idx + 1].supervisor.summary if idx + 1 < len(recent) else "（结果尚未记录）"
+
         if turn.action_decision and turn.executed:
             action = turn.action_decision.action
             lines.append(
-                f"{turn.index}. [执行] [{action.action_type}] {action.description}"
-                f"（{sv.summary}）"
+                f"{turn.index}. 指令=「{sv.instruction}」"
+                f" → [{action.action_type}] {action.description}"
+                f" → 结果: {result}"
             )
         elif turn.action_decision and not turn.executed:
             action = turn.action_decision.action
             lines.append(
-                f"{turn.index}. [未执行] [{action.action_type}] {action.description}"
+                f"{turn.index}. 指令=「{sv.instruction}」 → [未执行] [{action.action_type}] {action.description}"
             )
         else:
-            lines.append(f"{turn.index}. [跳过动作] {sv.summary}")
+            lines.append(f"{turn.index}. [跳过动作] {sv.summary} → 结果: {result}")
     return "\n".join(lines)
 
 
@@ -294,6 +313,56 @@ class MilestoneSupervisorPolicy:
                 summary=check.summary,
             )
             plan = self._plan(next_ms, synthetic_check, observation, history)
+            if self._instruction_looks_like_sequence(plan.instruction):
+                print("  [Planner] instruction 是多步序列，重试生成单步指令...")
+                plan = self._plan(
+                    next_ms, synthetic_check, observation, history,
+                    extra_instruction=(
+                        "你刚才输出了多个步骤，但执行器一次只能执行一个 action。"
+                        "请只返回当前屏幕上马上要做的一个操作，不要编号，不要包含后续步骤。"
+                    ),
+                )
+            if self._instruction_is_stop(plan.instruction):
+                print("  [Checker] planner 判定无需操作，立即验收当前子目标...")
+                next_check = self._check(next_ms, observation, history)
+                print(f"  [Checker] {next_check.status}: {next_check.reason}")
+                if next_check.status == "done":
+                    next_name = next_ms.name
+                    next_ms.status = "done"
+                    self._current_id = self._next_milestone()
+                    self._recent_screenshots.clear()
+                    print(f"  子目标「{next_name}」已完成")
+                    if self._current_id is None:
+                        return SupervisorStep(
+                            should_act=False,
+                            stop=True,
+                            stop_reason="所有子目标已完成",
+                            goal_completed=True,
+                            summary=(
+                                f"子目标「{done_name}」已完成，"
+                                f"子目标「{next_name}」也已满足，任务全部完成。"
+                            ),
+                        )
+                    following = self._milestones[self._current_id]
+                    return SupervisorStep(
+                        should_act=False,
+                        stop=False,
+                        goal_completed=False,
+                        summary=(
+                            f"子目标「{done_name}」已完成，"
+                            f"子目标「{next_name}」也已满足，开始执行「{following.name}」。"
+                        ),
+                    )
+                plan = self._plan(
+                    next_ms,
+                    next_check,
+                    observation,
+                    history,
+                    extra_instruction=(
+                        "你刚才判断无需操作，但 checker 未验收通过。"
+                        "请基于 missing_evidence 和当前截图，返回一个真实可执行的单步操作，不要返回停止操作。"
+                    ),
+                )
             next_ms.status = "running"
             return SupervisorStep(
                 should_act=bool(plan.instruction),
@@ -458,6 +527,24 @@ class MilestoneSupervisorPolicy:
                 missing_evidence=[],
                 summary="屏幕连续无变化",
             )
+
+        # Period-2 oscillation: current frame similar to 2-steps-back but different from adjacent
+        sim_2back = _png_similarity(self._recent_screenshots[-1], self._recent_screenshots[-3])
+        sim_adj   = _png_similarity(self._recent_screenshots[-1], self._recent_screenshots[-2])
+        if sim_2back >= STUCK_SCREEN_SIMILARITY and sim_adj < STUCK_SCREEN_SIMILARITY:
+            print(
+                f"  [Similarity] 2-back={sim_2back:.2%}, adj={sim_adj:.2%}"
+                f" → 截图 AB 交替循环，判为 stuck"
+            )
+            return _CheckResult(
+                status="stuck",
+                reason=f"截图在两种状态间交替（2帧前相似度 {sim_2back:.2%}，相邻帧 {sim_adj:.2%}）",
+                stuck_reason="屏幕在两种状态间振荡，操作陷入 AB 交替循环",
+                issues=["截图在两个视觉状态间交替出现"],
+                visible_evidence=[],
+                missing_evidence=[],
+                summary="屏幕在两种状态间振荡",
+            )
         return None
 
     def _check_instruction_repetition(
@@ -556,6 +643,11 @@ class MilestoneSupervisorPolicy:
         return check.status == "done" and (
             not check.visible_evidence or bool(check.missing_evidence)
         )
+
+    @staticmethod
+    def _instruction_is_stop(instruction: str) -> bool:
+        text = instruction.strip()
+        return text in {"停止操作", "无需操作", "目标已完成"} or "无需任何操作" in text
 
     def _plan(
         self,

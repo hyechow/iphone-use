@@ -6,7 +6,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 
 
-ActionType = Literal["tap", "type", "scroll", "home"]
+ActionType = Literal["tap", "type", "scroll", "home", "stop"]
 
 
 class Action(BaseModel):

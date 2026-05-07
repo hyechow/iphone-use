@@ -30,16 +30,14 @@ class ActionExecutor:
             if not self._tap(lx, ly, decision, app_name):
                 return False
 
-        elif (
-            action.action_type == "type"
-            and action.x is not None
-            and action.y is not None
-            and action.text
-        ):
-            lx, ly = logical_xy(action.x, action.y)
-            if not self._tap(lx, ly, decision, app_name):
-                return False
-            time.sleep(0.5)
+        elif action.action_type == "type" and action.text:
+            if action.x is not None and action.y is not None:
+                lx, ly = logical_xy(action.x, action.y)
+                if not self._tap(lx, ly, decision, app_name):
+                    return False
+                time.sleep(0.5)
+            else:
+                print("未提供输入坐标，默认当前输入框已聚焦，直接输入文字")
             print(f"输入文字: {action.text!r}")
             paste_text(action.text)
             print("结果: 已通过剪贴板粘贴输入")
@@ -54,6 +52,10 @@ class ActionExecutor:
                 print(f"结果: {result}，改为点击底部 Home 指示条")
                 result = self._client().tap(WIN_W / 2, WIN_H - 16)
             print(f"结果: {result}")
+
+        elif action.action_type == "stop":
+            print("停止操作（当前状态已满足目标，无需执行）")
+            return True
 
         else:
             print(f"跳过执行：action_type={action.action_type!r}，需手动处理")
