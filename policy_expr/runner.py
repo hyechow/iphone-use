@@ -11,7 +11,7 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from llm.structured import get_llm_call_count
-from policy_expr.executor import ActionExecutor
+from policy_expr.executor import ActionExecutor, mean_image_diff
 from policy_expr.supervisor import MilestoneSupervisorPolicy, SimpleSupervisorPolicy
 from policy_expr.supervisor.base import SupervisorPolicy
 from policy_expr.output import render_final_output
@@ -40,6 +40,9 @@ ROOT = Path(__file__).parent.parent
 POLICY_LOG_ROOT = ROOT / "logs" / "policy_expr"
 TURN_HEADER = "\033[1;36m--- Turn {turn_no} ---\033[0m"
 TURN_STATS = "\033[2mTurn {turn_no} stats: llm_calls={llm_calls}, elapsed={elapsed:.2f}s\033[0m"
+
+MAX_ACTION_RETRIES = 2        # 动作无效时最多重试次数
+ACTION_EFFECT_THRESHOLD = 3.0  # mean_image_diff 低于此值视为动作未生效
 
 
 def create_run_dir(mode: str) -> Path:
@@ -251,14 +254,43 @@ def run_agent_loop(
 
             if sv_step.should_act:
                 print(f"动作指令: {sv_step.instruction}")
-                print("动作决策中...")
-                action_decision = action_policy.decide(observation, sv_step.instruction)
-                print_decision(
-                    action_decision,
-                    observation.png_bytes,
-                    log_dir / f"structured_output_result_turn_{turn_no}.png",
-                )
-                executed = executor.execute(action_decision, app_name=sv_step.app_name or "")
+                action_obs = observation
+                instruction = sv_step.instruction
+                action_decision = None
+                executed = False
+
+                for attempt in range(MAX_ACTION_RETRIES + 1):
+                    if attempt > 0:
+                        # 取最新截图，附加未命中提示
+                        new_png = phone.screenshot()
+                        action_obs = Observation(png_bytes=new_png, source="live")
+                        instruction = (
+                            f"{sv_step.instruction}\n\n"
+                            "注意：上次点击可能未命中目标，请仔细核对截图中的元素位置后重新确定坐标。"
+                        )
+                        print(f"  [重试 {attempt}/{MAX_ACTION_RETRIES}] 重新决策动作...")
+
+                    print("动作决策中...")
+                    action_decision = action_policy.decide(action_obs, instruction)
+                    print_decision(
+                        action_decision,
+                        action_obs.png_bytes,
+                        log_dir / f"structured_output_result_turn_{turn_no}.png",
+                    )
+                    executed = executor.execute(action_decision, app_name=sv_step.app_name or "")
+
+                    if not executed or attempt >= MAX_ACTION_RETRIES:
+                        break
+
+                    # 等 UI 响应后检查动作是否生效
+                    time.sleep(0.8)
+                    post_png = phone.screenshot()
+                    diff = mean_image_diff(action_obs.png_bytes, post_png)
+                    print(f"  [效果检测] mean_diff={diff:.2f}", end="")
+                    if diff >= ACTION_EFFECT_THRESHOLD:
+                        print(" → 生效")
+                        break
+                    print(f" → 未生效（< {ACTION_EFFECT_THRESHOLD}），重试")
 
             turn = PolicyTurn(
                 index=turn_no,
