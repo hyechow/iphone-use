@@ -258,13 +258,17 @@ def run_agent_loop(
 
             if sv_step.should_act:
                 print(f"动作指令: {sv_step.instruction}")
-                print("动作决策中...")
-                action_decision = action_policy.decide(observation, sv_step.instruction)
-                print_decision(
-                    action_decision,
-                    observation.png_bytes,
-                    log_dir / f"structured_output_result_turn_{turn_no}.png",
-                )
+                if sv_step.preformed_action:
+                    print("使用预生成动作，跳过 Action Policy")
+                    action_decision = sv_step.preformed_action
+                else:
+                    print("动作决策中...")
+                    action_decision = action_policy.decide(observation, sv_step.instruction)
+                    print_decision(
+                        action_decision,
+                        observation.png_bytes,
+                        log_dir / f"structured_output_result_turn_{turn_no}.png",
+                    )
                 executed = executor.execute(action_decision, app_name=sv_step.app_name or "")
 
             turn = PolicyTurn(

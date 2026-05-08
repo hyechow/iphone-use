@@ -3,10 +3,10 @@
 llm:
   action_policy:
     provider: dashscope
-    model: qwen3.6-35b-a3b
+    model: qwen3.6-flash
   supervisor:
     provider: dashscope
-    model: qwen3.6-35b-a3b
+    model: qwen3.6-flash
   output:
     provider: dashscope
-    model: qwen3.6-35b-a3b
+    model: qwen3.6-flash

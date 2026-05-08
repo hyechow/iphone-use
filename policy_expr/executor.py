@@ -25,7 +25,7 @@ class ActionExecutor:
         action = decision.action
         print(f"\n动作: [{action.action_type}] {action.description}")
 
-        if action.action_type == "tap" and action.x is not None and action.y is not None:
+        if action.action_type in ("tap", "click") and action.x is not None and action.y is not None:
             lx, ly = logical_xy(action.x, action.y)
             if not self._tap(lx, ly, decision, app_name):
                 return False
@@ -80,13 +80,20 @@ class ActionExecutor:
 
     def _scroll(self, action: Action) -> None:
         direction = (action.direction or "").strip().lower()
-        gestures = scroll_gestures(direction)
+        axis = _scroll_axis(direction)
+
+        # Probe both directions on the axis, pick the one with more content
+        effective = self._probe_direction(axis)
+        if effective != direction:
+            print(f"  方向 {direction} 无内容变化，改用探测方向 {effective}")
+
+        gestures = scroll_gestures(effective)
         previous = self.phone.screenshot()
 
         for kind, args in gestures:
             from_x, from_y, to_x, to_y, duration_ms = args
             print(
-                f"执行滚动({direction or action.direction})/{kind}: "
+                f"执行滚动({effective})/{kind}: "
                 f"({from_x:.0f},{from_y:.0f}) -> ({to_x:.0f},{to_y:.0f})"
             )
             if kind == "swipe":
@@ -104,6 +111,48 @@ class ActionExecutor:
 
         print("滚动可能未生效，页面可能已在边界")
 
+    def _probe_direction(self, axis: str) -> str:
+        """Probe both directions on an axis, return the one with larger content change.
+
+        Flow: probe A → undo (probe B) → probe B → compare diffs.
+        After undo, position ≈ baseline, so diff_a and diff_b are comparable.
+        """
+        client = self._client()
+        cx, uy, ly = WIN_W * 0.50, WIN_H * 0.33, WIN_H * 0.87
+        cy, lx, rx = WIN_H * 0.50, WIN_W * 0.12, WIN_W * 0.88
+        D = 300  # probe swipe duration (ms)
+
+        if axis == "vertical":
+            da, db = "up", "down"
+            ga = (cx, uy, cx, ly, D)
+            gb = (cx, ly, cx, uy, D)
+        else:
+            da, db = "left", "right"
+            ga = (rx, cy, lx, cy, D)
+            gb = (lx, cy, rx, cy, D)
+
+        base = self.phone.screenshot()
+
+        # Probe direction A
+        client.swipe(*ga)
+        time.sleep(0.4)
+        sa = self.phone.screenshot()
+        diff_a = mean_image_diff(base, sa)
+
+        # Undo A (swipe B)
+        client.swipe(*gb)
+        time.sleep(0.4)
+        su = self.phone.screenshot()
+
+        # Probe direction B from ≈baseline
+        client.swipe(*gb)
+        time.sleep(0.4)
+        sb = self.phone.screenshot()
+        diff_b = mean_image_diff(su, sb)
+
+        print(f"  [Probe] {da} diff={diff_a:.2f}, {db} diff={diff_b:.2f}")
+        return da if diff_a >= diff_b else db
+
     def _client(self):
         if not self.phone.client:
             raise RuntimeError("MCP 尚未连接")
@@ -116,6 +165,15 @@ def logical_xy(ax: float, ay: float) -> tuple[float, float]:
     x = ax / 1000 * WIN_W
     y = ay / 1000 * WIN_H
     return clamp(x, 0, WIN_W - 1), clamp(y, 0, WIN_H_TAP_MAX)
+
+
+def _scroll_axis(direction: str) -> str:
+    """Determine scroll axis from direction string."""
+    if direction in ("up", "向上", "upward", "down", "向下", "downward"):
+        return "vertical"
+    if direction in ("left", "向左", "leftward", "right", "向右", "rightward"):
+        return "horizontal"
+    raise ValueError(f"scroll direction must be up/down/left/right, got: {direction!r}")
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -139,18 +197,20 @@ def scroll_gestures(direction: str) -> list[tuple[str, tuple[float, float, float
     right_x = WIN_W * 0.88
 
     if direction in ("up", "向上", "upward"):
-        return [
-            ("swipe", (center_x, lower_y, center_x, upper_y, 800)),
-            ("swipe", (right_safe_x, lower_y, right_safe_x, upper_y, 1000)),
-            ("drag", (center_x, lower_y, center_x, upper_y, 1600)),
-            ("drag", (right_safe_x, lower_y, right_safe_x, upper_y, 1800)),
-        ]
-    if direction in ("down", "向下", "downward"):
+        # LLM 说 up 意思是"看上方内容"（更早的消息），对应手指向下划
         return [
             ("swipe", (center_x, upper_y, center_x, lower_y, 800)),
             ("swipe", (right_safe_x, upper_y, right_safe_x, lower_y, 1000)),
             ("drag", (center_x, upper_y, center_x, lower_y, 1600)),
             ("drag", (right_safe_x, upper_y, right_safe_x, lower_y, 1800)),
+        ]
+    if direction in ("down", "向下", "downward"):
+        # LLM 说 down 意思是"看下方内容"（更新的消息），对应手指向上划
+        return [
+            ("swipe", (center_x, lower_y, center_x, upper_y, 800)),
+            ("swipe", (right_safe_x, lower_y, right_safe_x, upper_y, 1000)),
+            ("drag", (center_x, lower_y, center_x, upper_y, 1600)),
+            ("drag", (right_safe_x, lower_y, right_safe_x, upper_y, 1800)),
         ]
     if direction in ("left", "向左", "leftward"):
         return [

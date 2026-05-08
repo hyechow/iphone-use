@@ -6,7 +6,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 
 
-ActionType = Literal["tap", "type", "scroll", "home", "stop"]
+ActionType = Literal["tap", "click", "type", "scroll", "home", "stop"]
 
 
 class Action(BaseModel):
@@ -20,6 +20,9 @@ class Action(BaseModel):
             x = data.get("x")
             if isinstance(x, list) and len(x) == 2 and "y" not in data:
                 return {**data, "x": x[0], "y": x[1]}
+            # 常见 LLM 别名：click → tap
+            if data.get("action_type") == "click":
+                data["action_type"] = "tap"
         return data
 
     action_type: ActionType = Field(
@@ -78,6 +81,10 @@ class SupervisorStep(BaseModel):
     goal_completed: bool = Field(description="用户目标是否已完全达成")
     app_name: Optional[str] = Field(default=None, description="当前前台应用名称")
     summary: str = Field(description="对当前屏幕状态和任务进展的简要描述")
+    preformed_action: Optional[ActionDecision] = Field(
+        default=None,
+        description="预生成的动作决策（设置后 runner 跳过 Action Policy 直接执行）",
+    )
 
 
 class Milestone(BaseModel):

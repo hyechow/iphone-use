@@ -83,6 +83,7 @@ DECOMPOSE_PROMPT = """\
 8. "打开应用"类子目标的验收条件应为「成功进入该应用（任意页面均可）」，不要指定必须是主界面——打开 app 可能进入聊天详情、发现页、小程序等任意页面
 9. 如果后续操作需要到达应用内特定页面，单独设立导航子目标
 10. 进入应用内某个 tab/page 的验收条件必须包含可见页面标题和选中状态；例如微信通讯录必须写成「顶部标题为 通讯录，底部 通讯录 tab 为绿色选中，并显示新的朋友/群聊/标签/公众号等通讯录列表入口」
+11. 如果用户目标是信息获取类（看看/查看/了解一下/读一下/帮我总结/都讨论了什么），到达目标页面后应紧跟一个「浏览内容」子目标。验收条件只需要确认已成功进入内容页面即可（如「已进入XX页面，看到内容列表/消息流」），不需要验证是否浏览完所有内容——内容的完整浏览由任务结束时的最终总结生成处理。Planner 在浏览里程碑期间会持续滚动浏览，直到页面到底或截图无变化
 """
 
 CHECKER_PROMPT = """\
@@ -97,24 +98,52 @@ CHECKER_PROMPT = """\
 ## 历史操作记录
 {history_text}
 
-判断规则：
-- done：屏幕上必须能直接观察到验收条件中描述的具体内容（如看到特定页面标题、特定按钮、特定文字）。如果无法在截图中确认验收条件已满足，应判为 in_progress 而非 done
-- stuck：出现错误弹窗、连续无进展、页面回退、与上一次截图无明显变化；或历史记录显示操作陷入循环（同一指令反复失败、或指令在两种模式间交替但均未到达目标）
+## 电商搜索验收规则
+当子目标包含「搜索」「查找」等关键词时，适用以下规则：
+
+### 拼多多搜索
+- 拼多多首页的特征：底部有多个 tab（首页/推荐等），页面是推荐信息流、轮播图
+- 拼多多搜索结果页的特征：顶部搜索框显示完整搜索关键词 + 页面显示商品列表 + 有筛选/排序控件（综合/销量/价格）
+- 首页推荐流中出现目标商品 ≠ 搜索结果页，必须判 in_progress
+- 搜索框里显示历史搜索词 ≠ 已执行搜索，必须判 in_progress
+- 搜索建议页（输入关键词后下拉候选列表）≠ 搜索结果页，必须判 in_progress
+
+### 淘宝搜索
+- 淘宝首页的特征：底部 tab 栏、推荐信息流
+- 淘宝搜索结果页的特征：顶部搜索框含关键词 + 商品列表 + 筛选/排序栏
+- 规则同拼多多
+
+### 通用搜索验收
+搜索类子目标判 done 必须同时满足三个条件，缺一不可：
+1. 当前页面是搜索结果页（而非首页推荐流、搜索建议页、启动广告等）
+2. 搜索框中显示完整搜索关键词
+3. 页面显示搜索结果列表和常见控件（筛选、排序等）
+仅满足部分条件时应返回 in_progress，并在 missing_evidence 中说明缺少哪些。
+
+### Forbidden States
+当子目标包含「搜索」时，以下情况即使出现目标关键词也禁止判 done：
+- 各平台首页推荐流 —— 推荐流不是搜索结果
+- 搜索建议页 / 搜索历史页 —— 只是输入过程中的中间状态
+- 启动广告 / 弹窗 / 引导页 —— 还没到搜索页面
+
+## 浏览类子目标
+当子目标名称包含「浏览」「阅读」「查看内容」等关键词时：
+- 即使验收条件描述的页面已进入，如果页面明显还有更多内容可以滚动查看（如只显示了部分列表、聊天记录上方还有更早消息），应返回 in_progress 而非 done
+- 只有当页面到达滚动边界（底部/顶部无更多内容），或截图显示列表末尾提示（如「没有更多了」），才返回 done
+- 浏览期间如果误入其他页面（如点进了某个子页面），应返回 in_progress 而非 done
+
+## 通用判断规则
+- done：屏幕上必须能直接观察到验收条件中描述的具体内容。如果无法在截图中确认验收条件已满足，应判为 in_progress 而非 done
+- stuck：出现错误弹窗、连续无进展、页面回退、与上一次截图无明显变化；或历史记录显示操作陷入循环
 - in_progress：正在向目标推进
-- 如果验收条件要求某个页面标题，必须看到顶部标题与验收条件精确匹配；看到其他标题时不能判 done
-- 如果验收条件要求某个底部 tab，必须看到该 tab 被高亮/绿色选中；其他 tab 高亮时不能判 done
-- 微信聊天列表页的特征是顶部标题类似「微信(72)」且底部「微信」tab 为绿色；这不是通讯录页
-- 微信通讯录页的特征是顶部标题「通讯录」且底部「通讯录」tab 为绿色，并显示「新的朋友」「仅聊天的朋友」「群聊」「标签」「公众号」等入口
-- 微信搜索页的特征是左上角返回箭头、顶部搜索框占据主要位置，可能显示「搜索本地或网络结果」「AI搜索」「最近在搜」「页面设置」等；这仍然是微信内搜索页，不要误判为 iOS 系统搜索
-- 如果当前在微信搜索页但搜索结果/目标内容尚未出现，搜索类子目标应返回 in_progress
-- 如果目标应用已打开但停在不同页面（如聊天详情、发现页），属于 in_progress 而非 stuck
-- 区分「应用未成功启动」和「应用已打开但不在预期页面」两种情况
-- 历史记录格式为「指令 → 操作 → 结果」，若多条记录显示相同指令被执行但结果未变化，或两种指令交替出现但均未推进，应判为 stuck
+- 如果验收条件要求某个页面标题，必须看到顶部标题与验收条件精确匹配
+- 如果验收条件要求某个底部 tab，必须看到该 tab 被高亮/选中
 - 不要凭感觉判断，只看可观测的事实
 - 不要仅凭历史记录判断完成，必须截图上有对应的视觉证据
 - issues 列出具体观察到的问题
 - status 为 done 时，visible_evidence 必须列出截图中直接支持验收条件的文字或状态；missing_evidence 必须为空
 - 如果存在任何 missing_evidence，不能返回 done，应返回 in_progress 或 stuck
+- 区分「应用未成功启动」和「应用已打开但不在预期页面」两种情况
 
 输出 JSON：
 - status: in_progress | done | stuck
@@ -159,6 +188,7 @@ PLAN_PROMPT = """\
 - 如果当前在微信搜索页且搜索框已有光标，搜索类任务应优先指令「输入搜索关键词」
 - 如果当前在微信搜索页但搜索框未聚焦，搜索类任务应指令「点击顶部搜索框」
 - 输入框显示灰色占位文字（placeholder）时，说明输入框为空，直接点击后输入即可，不需要先删除占位文字
+- 滚动指令不要指定手指滑动方向（不要说「向上滑动」「向下滑动」），而是描述要查看什么内容（如「滚动查看更早的消息」「滚动查看更多商品」），让 action policy 根据截图判断正确方向
 
 输出 JSON：
 - instruction: 下一步精确操作指令
@@ -191,6 +221,7 @@ REPLAN_PROMPT = """\
 - 如果当前在微信搜索页且搜索框已有光标，优先给出单步修复指令「输入搜索关键词」
 - 微信搜索页可能显示「搜索本地或网络结果」「AI搜索」「最近在搜」「页面设置」，这不是 iOS 系统搜索，不要要求退出重开微信
 - 输入框显示灰色占位文字（placeholder）时，说明输入框为空，直接点击后输入即可，不需要先删除占位文字
+- 滚动指令不要指定手指滑动方向（不要说「向上滑动」「向下滑动」），而是描述要查看什么内容（如「滚动查看更早的消息」「滚动查看更多商品」），让 action policy 根据截图判断正确方向
 
 输出 JSON：
 - diagnosis: 失败根本原因（一句话）
@@ -285,7 +316,17 @@ class MilestoneSupervisorPolicy:
         # ── Checker: evaluate milestone progress only ──
         # 硬逻辑兜底：截图无变化 / 指令循环 → 直接判 stuck，跳过 LLM
         sim_stuck = self._check_screen_similarity(observation)
-        rep_stuck = self._check_instruction_repetition(history) if not sim_stuck else None
+        is_browsing = any(kw in milestone.name for kw in ["浏览", "阅读", "查看", "阅读内容", "浏览内容"])
+        if sim_stuck and is_browsing:
+            # 浏览里程碑：页面连续无变化 = 已到内容边界 = 浏览完成
+            sim_stuck = _CheckResult(
+                status="done",
+                reason="页面连续无变化，已浏览到内容边界",
+                visible_evidence=["页面连续多帧截图无变化，已到滚动边界"],
+                missing_evidence=[],
+                summary="页面内容已到底",
+            )
+        rep_stuck = self._check_instruction_repetition(history) if not sim_stuck and not is_browsing else None
         check = sim_stuck or rep_stuck or self._check(milestone, observation, history)
         print(f"  [Checker] {check.status}: {check.reason}")
 
@@ -439,6 +480,25 @@ class MilestoneSupervisorPolicy:
             )
 
         # in_progress ── Planner generates the next single-step instruction ──
+        # 浏览里程碑：如果上一轮是滚动动作，直接重复，跳过 Planner 和 Action Policy
+        last_was_scroll = (
+            history
+            and history[-1].action_decision
+            and history[-1].action_decision.action.action_type == "scroll"
+            and history[-1].executed
+        )
+        if is_browsing and last_was_scroll:
+            print("  [Browsing] 重复上次滚动，跳过 Planner 和 Action Policy")
+            milestone.status = "running"
+            return SupervisorStep(
+                should_act=True,
+                instruction="继续滚动",
+                stop=False,
+                goal_completed=False,
+                summary="浏览里程碑：继续滚动浏览内容",
+                preformed_action=history[-1].action_decision,
+            )
+
         plan = self._plan(milestone, check, observation, history)
         if self._instruction_looks_like_sequence(plan.instruction):
             print("  [Planner] instruction 是多步序列，重试生成单步指令...")
@@ -725,9 +785,11 @@ class MilestoneSupervisorPolicy:
         self, system_prompt: str, observation: Observation,
     ) -> list:
         """Build multimodal messages with system prompt + screenshot."""
+        from datetime import datetime
+        today = datetime.now().strftime("%Y年%m月%d日 %A")
         b64 = base64.b64encode(resize_to_logical_png(observation.png_bytes)).decode()
         return [
-            SystemMessage(content=system_prompt),
+            SystemMessage(content=f"{system_prompt}\n\n当前日期：{today}"),
             HumanMessage(content=[
                 {"type": "text", "text": "请根据当前屏幕做出决策。"},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
