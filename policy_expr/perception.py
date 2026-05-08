@@ -1,8 +1,10 @@
 """Environment sensing for policy experiments."""
 
 import io
+import struct
 import subprocess
-import tempfile
+import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -13,92 +15,116 @@ from policy_expr.schemas import Observation
 
 ROOT = Path(__file__).parent.parent
 SCREENSHOT = ROOT / "logs" / "policy_expr" / "single-step" / "screenshot.png"
+_SCK_SERVER = ROOT / "bin" / "sck_server"
+_MASK_PATH = Path(__file__).parent / "mcp_frame_mask.png"
 
-# macOS 截图 resize 到与 mcp 一致的尺寸（WIN_W*2 x WIN_H*2，2x Retina）
-_TARGET_W = 636  # 318 * 2
-_TARGET_H = 1402  # 701 * 2
+WIN_W = 318
+WIN_H = 701
 
-# 截图后端：macos（不触发录屏检测）或 mcp
-SCREENSHOT_BACKEND = "macos"
-
-
-def _find_iphone_mirror_window() -> int | None:
-    """Find iPhone Mirroring window ID via Quartz."""
-    try:
-        import Quartz
-        for w in Quartz.CGWindowListCopyWindowInfo(
-            Quartz.kCGWindowListOptionAll, Quartz.kCGNullWindowID
-        ):
-            if w.get("kCGWindowOwnerName") == "iPhone镜像":
-                b = w.get("kCGWindowBounds", {})
-                if b.get("Width") == 318 and b.get("Height") == 701:
-                    return w.get("kCGWindowNumber")
-    except Exception:
-        pass
-    return None
+# Load mask once: 255 = device frame (black out), 0 = screen content (keep)
+_FRAME_MASK: np.ndarray | None = (
+    np.array(Image.open(_MASK_PATH).convert("L"))
+    if _MASK_PATH.exists() else None
+)
 
 
-def _macos_screenshot() -> bytes:
-    """Capture iPhone screen via macOS screencapture (bypasses screen-recording detection)."""
-    wid = _find_iphone_mirror_window()
-    if wid is None:
-        raise RuntimeError("找不到 iPhone Mirroring 窗口（318×701），请确认已打开 iPhone镜像")
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-        path = f.name
-    try:
-        subprocess.run(["screencapture", "-l", str(wid), path], check=True)
-        full = Image.open(path).convert("RGB")
-    finally:
-        Path(path).unlink(missing_ok=True)
+def _apply_mcp_frame(png_bytes: bytes) -> bytes:
+    """Apply the MCP device-frame mask to a raw SCK screenshot.
 
-    # 裁掉设备外壳，取屏幕内容区域（扫描非黑像素边界）
-    arr = np.array(full)
-    mid_x, mid_y = arr.shape[1] // 2, arr.shape[0] // 2
-    left  = next(x for x in range(arr.shape[1])          if arr[mid_y, x].max() > 20)
-    right = next(x for x in range(arr.shape[1]-1, 0, -1) if arr[mid_y, x].max() > 20)
-    top   = next(y for y in range(arr.shape[0])          if arr[y, mid_x].max() > 20)
-    bot   = next(y for y in range(arr.shape[0]-1, 0, -1) if arr[y, mid_x].max() > 20)
-    screen = full.crop((left, top, right + 1, bot + 1))
-
-    # 贴到黑底画布，补回 mcp 自带的黑边，与 mcp 坐标系对齐
-    # mcp 实测：左16、右17、上76、下17（Retina px）
-    _PAD_L, _PAD_T = 16, 76
-    _CONTENT_W = _TARGET_W - _PAD_L - 17   # 636 - 16 - 17 = 603
-    _CONTENT_H = _TARGET_H - _PAD_T - 17   # 1402 - 76 - 17 = 1309
-    screen = screen.resize((_CONTENT_W, _CONTENT_H), Image.LANCZOS)
-    canvas = Image.new("RGB", (_TARGET_W, _TARGET_H), (0, 0, 0))
-    canvas.paste(screen, (_PAD_L, _PAD_T))
-    content = canvas
-
+    Pixels where the mask is non-zero are blacked out, matching mirror-mcp's
+    device chrome (Dynamic Island, rounded corners, border) exactly.
+    Falls back to returning the image unchanged if no mask file exists.
+    """
+    if _FRAME_MASK is None:
+        return png_bytes
+    img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+    arr = np.array(img)
+    arr[_FRAME_MASK > 0] = 0
     buf = io.BytesIO()
-    content.save(buf, format="PNG")
+    Image.fromarray(arr).save(buf, format="PNG")
     return buf.getvalue()
 
 
+class SCKSession:
+    """Manages the SCK stream server subprocess for low-flash screenshot capture.
+
+    The stream starts once (triggering the iOS recording indicator once).
+    Subsequent screenshot() calls grab frames from the live stream silently.
+    """
+
+    def __init__(self):
+        self._proc: subprocess.Popen | None = None
+
+    def start(self):
+        if not _SCK_SERVER.exists():
+            raise FileNotFoundError(
+                f"sck_server binary not found at {_SCK_SERVER}. "
+                "Run: swiftc sck/sck_stream_server.swift ... -o bin/sck_server"
+            )
+        self._proc = subprocess.Popen(
+            [str(_SCK_SERVER)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=sys.stderr,
+        )
+        # Wait for "ready\n" on stdout — confirms stream is up
+        assert self._proc.stdout
+        line = self._proc.stdout.readline()
+        if line.strip() != b"ready":
+            raise RuntimeError(f"SCK server failed to start: {line!r}")
+
+    def screenshot(self, retries: int = 10) -> bytes:
+        assert self._proc and self._proc.stdin and self._proc.stdout
+        for _ in range(retries):
+            self._proc.stdin.write(b"screenshot\n")
+            self._proc.stdin.flush()
+            raw = self._proc.stdout.read(4)
+            if len(raw) < 4:
+                raise RuntimeError("SCK server closed unexpectedly")
+            (length,) = struct.unpack(">I", raw)
+            if length > 0:
+                return _apply_mcp_frame(self._proc.stdout.read(length))
+            time.sleep(0.2)
+        raise RuntimeError("SCK server: no frame available after retries")
+
+    def close(self):
+        if self._proc:
+            self._proc.terminate()
+            self._proc = None
+
+
 class LivePhoneSession:
-    """Own the mirroir-mcp connection used for sensing and execution."""
+    """Own the mirroir-mcp connection used for execution, and SCK for screenshots."""
 
     def __init__(self):
         self.client: SyncMCPClient | None = None
+        self._sck: SCKSession | None = None
 
     def __enter__(self) -> "LivePhoneSession":
+        print("启动 SCK 截图流...")
+        sck = SCKSession()
+        sck.start()
+        self._sck = sck
+        print("SCK 截图流就绪")
+
         print("连接手机中...")
         self.client = SyncMCPClient()
         self.client.connect()
         print("MCP 连接成功")
         return self
 
-    def __exit__(self, exc_type, exc, tb):
+    def __exit__(self, *_):
+        if self._sck:
+            self._sck.close()
+            self._sck = None
         if self.client:
             self.client.close()
         self.client = None
 
     def screenshot(self) -> bytes:
-        if SCREENSHOT_BACKEND == "macos":
-            return _macos_screenshot()
-        if not self.client:
-            raise RuntimeError("MCP 尚未连接")
-        return self.client.screenshot()
+        if not self._sck:
+            raise RuntimeError("SCK 尚未连接")
+        return self._sck.screenshot()
 
 
 class LivePerception:

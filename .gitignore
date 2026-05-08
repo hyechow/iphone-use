@@ -6,3 +6,4 @@ __pycache__/
 images/
 logs/
 debug.log
+bin/
