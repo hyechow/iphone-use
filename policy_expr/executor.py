@@ -1,5 +1,6 @@
 """Fixed action execution layer for policy experiments."""
 
+import subprocess
 import time
 
 from agent.utils import paste_text
@@ -101,6 +102,11 @@ class ActionExecutor:
             print("  iPhone Mirroring 窗口未找到，无法发送滚轮事件")
             return
         wx, wy = origin
+
+        # Activate window (MCP connections can steal focus)
+        subprocess.run(["osascript", "-e", 'tell application "iPhone Mirroring" to activate'],
+                       capture_output=True)
+        time.sleep(0.3)
 
         # Normalized (0-1000) → screen coordinates
         ax = action.x if action.x is not None else 500
