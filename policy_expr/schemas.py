@@ -24,6 +24,9 @@ class Action(BaseModel):
             # 常见 LLM 别名：click → tap
             if data.get("action_type") == "click":
                 data["action_type"] = "tap"
+            # Clamp scroll y to avoid edge dead zones
+            if data.get("action_type") == "scroll" and "y" in data and data["y"] is not None:
+                data["y"] = max(200, min(float(data["y"]), 850))
         return data
 
     action_type: ActionType = Field(
@@ -31,11 +34,11 @@ class Action(BaseModel):
     )
     x: Optional[float] = Field(
         default=None,
-        description="归一化 x 坐标（0-1000，tap/type 时必填）",
+        description="归一化 x 坐标（0-1000，tap/type/scroll 时必填）",
     )
     y: Optional[float] = Field(
         default=None,
-        description="归一化 y 坐标（0-1000，tap/type 时必填）",
+        description="归一化 y 坐标（0-1000，tap/type/scroll 时必填）",
     )
     direction: Optional[str] = Field(
         default=None,

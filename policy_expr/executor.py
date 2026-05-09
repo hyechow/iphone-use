@@ -1,10 +1,21 @@
 """Fixed action execution layer for policy experiments."""
 
-import io
 import time
 
 from agent.utils import paste_text
-from PIL import Image, ImageChops, ImageStat
+from Quartz import (
+    CGEventCreateMouseEvent,
+    CGEventCreateScrollWheelEvent,
+    CGEventPost,
+    CGEventSetLocation,
+    CGWindowListCopyWindowInfo,
+    kCGScrollEventUnitPixel,
+    kCGHIDEventTap,
+    kCGEventMouseMoved,
+    kCGMouseButtonLeft,
+    kCGWindowListOptionAll,
+    kCGNullWindowID,
+)
 
 from policy_expr.perception import LivePhoneSession
 from policy_expr.schemas import Action, ActionDecision
@@ -12,7 +23,9 @@ from policy_expr.schemas import Action, ActionDecision
 WIN_W = 318
 WIN_H = 701
 WIN_H_TAP_MAX = WIN_H - 20   # 避开底部 Home 指示条安全区（约 20px）
-SCROLL_DIFF_THRESHOLD = 8.0
+SCROLL_TICKS = 3
+SCROLL_DELTA = 120            # pixels per tick
+SCROLL_INTERVAL = 0.1         # seconds between ticks (避免 macOS 合并事件)
 
 
 class ActionExecutor:
@@ -80,78 +93,35 @@ class ActionExecutor:
 
     def _scroll(self, action: Action) -> None:
         direction = (action.direction or "").strip().lower()
-        axis = _scroll_axis(direction)
+        delta = _scroll_delta(direction)
 
-        # Probe both directions on the axis, pick the one with more content
-        effective = self._probe_direction(axis)
-        if effective != direction:
-            print(f"  方向 {direction} 无内容变化，改用探测方向 {effective}")
+        # Find iPhone Mirroring window on screen
+        origin = _find_iphone_window()
+        if origin is None:
+            print("  iPhone Mirroring 窗口未找到，无法发送滚轮事件")
+            return
+        wx, wy = origin
 
-        gestures = scroll_gestures(effective)
-        previous = self.phone.screenshot()
+        # Normalized (0-1000) → screen coordinates
+        ax = action.x if action.x is not None else 500
+        ay = action.y if action.y is not None else 500
+        sx = wx + ax / 1000 * WIN_W
+        sy = wy + ay / 1000 * WIN_H
 
-        for kind, args in gestures:
-            from_x, from_y, to_x, to_y, duration_ms = args
-            print(
-                f"执行滚动({effective})/{kind}: "
-                f"({from_x:.0f},{from_y:.0f}) -> ({to_x:.0f},{to_y:.0f})"
-            )
-            if kind == "swipe":
-                result = self._client().swipe(from_x, from_y, to_x, to_y, duration_ms=duration_ms)
-            else:
-                result = self._client().drag(from_x, from_y, to_x, to_y, duration_ms=duration_ms)
-            time.sleep(0.8)
-            current = self.phone.screenshot()
-            mean_diff = mean_image_diff(previous, current)
-            print(f"结果: {result}；mean_diff={mean_diff:.2f}")
-            if mean_diff >= SCROLL_DIFF_THRESHOLD:
-                print("滚动成功")
-                return
-            previous = current
+        print(f"  鼠标移至 ({sx:.0f}, {sy:.0f})，滚轮 {direction} × {SCROLL_TICKS}")
 
-        print("滚动可能未生效，页面可能已在边界")
+        # Move cursor to target position
+        move = CGEventCreateMouseEvent(None, kCGEventMouseMoved, (sx, sy), kCGMouseButtonLeft)
+        CGEventPost(kCGHIDEventTap, move)
+        time.sleep(0.1)
 
-    def _probe_direction(self, axis: str) -> str:
-        """Probe both directions on an axis, return the one with larger content change.
-
-        Flow: probe A → undo (probe B) → probe B → compare diffs.
-        After undo, position ≈ baseline, so diff_a and diff_b are comparable.
-        """
-        client = self._client()
-        cx, uy, ly = WIN_W * 0.50, WIN_H * 0.33, WIN_H * 0.87
-        cy, lx, rx = WIN_H * 0.50, WIN_W * 0.12, WIN_W * 0.88
-        D = 300  # probe swipe duration (ms)
-
-        if axis == "vertical":
-            da, db = "up", "down"
-            ga = (cx, uy, cx, ly, D)
-            gb = (cx, ly, cx, uy, D)
-        else:
-            da, db = "left", "right"
-            ga = (rx, cy, lx, cy, D)
-            gb = (lx, cy, rx, cy, D)
-
-        base = self.phone.screenshot()
-
-        # Probe direction A
-        client.swipe(*ga)
-        time.sleep(0.4)
-        sa = self.phone.screenshot()
-        diff_a = mean_image_diff(base, sa)
-
-        # Undo A (swipe B)
-        client.swipe(*gb)
-        time.sleep(0.4)
-        su = self.phone.screenshot()
-
-        # Probe direction B from ≈baseline
-        client.swipe(*gb)
-        time.sleep(0.4)
-        sb = self.phone.screenshot()
-        diff_b = mean_image_diff(su, sb)
-
-        print(f"  [Probe] {da} diff={diff_a:.2f}, {db} diff={diff_b:.2f}")
-        return da if diff_a >= diff_b else db
+        # Send scroll wheel ticks
+        for i in range(SCROLL_TICKS):
+            ev = CGEventCreateScrollWheelEvent(None, kCGScrollEventUnitPixel, 1, delta)
+            CGEventSetLocation(ev, (sx, sy))
+            CGEventPost(kCGHIDEventTap, ev)
+            if i < SCROLL_TICKS - 1:
+                time.sleep(SCROLL_INTERVAL)
 
     def _client(self):
         if not self.phone.client:
@@ -161,65 +131,37 @@ class ActionExecutor:
 
 def logical_xy(ax: float, ay: float) -> tuple[float, float]:
     """Convert normalized coordinates to iPhone Mirroring logical pixels."""
-
     x = ax / 1000 * WIN_W
     y = ay / 1000 * WIN_H
-    return clamp(x, 0, WIN_W - 1), clamp(y, 0, WIN_H_TAP_MAX)
+    return max(0, min(x, WIN_W - 1)), max(0, min(y, WIN_H_TAP_MAX))
 
 
-def _scroll_axis(direction: str) -> str:
-    """Determine scroll axis from direction string."""
-    if direction in ("up", "向上", "upward", "down", "向下", "downward"):
-        return "vertical"
-    if direction in ("left", "向左", "leftward", "right", "向右", "rightward"):
-        return "horizontal"
-    raise ValueError(f"scroll direction must be up/down/left/right, got: {direction!r}")
+def _find_iphone_window() -> tuple[float, float] | None:
+    """Return (x, y) screen origin of the 318x701 iPhone Mirroring window."""
+    windows = CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID)
+    for w in windows:
+        owner = w.get("kCGWindowOwnerName", "")
+        if "iPhone" not in owner:
+            continue
+        bounds = w.get("kCGWindowBounds", {})
+        ww, wh = bounds.get("Width", 0), bounds.get("Height", 0)
+        if int(ww) == 318 and int(wh) == 701:
+            return (bounds["X"], bounds["Y"])
+    return None
 
 
-def clamp(value: float, low: float, high: float) -> float:
-    return min(max(value, low), high)
+def _scroll_delta(direction: str) -> int:
+    """Map scroll direction to CGEvent scroll wheel delta (pixels per tick).
 
-
-def mean_image_diff(before_png: bytes, after_png: bytes) -> float:
-    before = Image.open(io.BytesIO(before_png)).convert("RGB")
-    after = Image.open(io.BytesIO(after_png)).convert("RGB")
-    diff = ImageChops.difference(before, after)
-    return sum(ImageStat.Stat(diff).mean) / 3
-
-
-def scroll_gestures(direction: str) -> list[tuple[str, tuple[float, float, float, float, int]]]:
-    center_x = WIN_W * 0.50
-    right_safe_x = WIN_W * 0.88
-    upper_y = WIN_H * 0.33
-    lower_y = WIN_H * 0.87
-    center_y = WIN_H * 0.50
-    left_x = WIN_W * 0.12
-    right_x = WIN_W * 0.88
-
+    Positive = scroll up (content moves down, view earlier content).
+    Negative = scroll down (content moves up, view later content).
+    """
     if direction in ("up", "向上", "upward"):
-        # LLM 说 up 意思是"看上方内容"（更早的消息），对应手指向下划
-        return [
-            ("swipe", (center_x, upper_y, center_x, lower_y, 800)),
-            ("swipe", (right_safe_x, upper_y, right_safe_x, lower_y, 1000)),
-            ("drag", (center_x, upper_y, center_x, lower_y, 1600)),
-            ("drag", (right_safe_x, upper_y, right_safe_x, lower_y, 1800)),
-        ]
+        return SCROLL_DELTA
     if direction in ("down", "向下", "downward"):
-        # LLM 说 down 意思是"看下方内容"（更新的消息），对应手指向上划
-        return [
-            ("swipe", (center_x, lower_y, center_x, upper_y, 800)),
-            ("swipe", (right_safe_x, lower_y, right_safe_x, upper_y, 1000)),
-            ("drag", (center_x, lower_y, center_x, upper_y, 1600)),
-            ("drag", (right_safe_x, lower_y, right_safe_x, upper_y, 1800)),
-        ]
+        return -SCROLL_DELTA
     if direction in ("left", "向左", "leftward"):
-        return [
-            ("swipe", (right_x, center_y, left_x, center_y, 600)),
-            ("drag",  (right_x, center_y, left_x, center_y, 1200)),
-        ]
+        return -SCROLL_DELTA
     if direction in ("right", "向右", "rightward"):
-        return [
-            ("swipe", (left_x, center_y, right_x, center_y, 600)),
-            ("drag",  (left_x, center_y, right_x, center_y, 1200)),
-        ]
+        return SCROLL_DELTA
     raise ValueError(f"scroll direction must be up/down/left/right, got: {direction!r}")
