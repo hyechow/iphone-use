@@ -277,6 +277,10 @@ def run_agent_loop(
     print(f"Turns   : {len(context.turns)}")
 
     reader = ContentReader()
+    original_goal = context.goal
+    validation_retries = 0
+    max_validation_retries = 2
+    noop_count = 0
 
     with LivePhoneSession() as phone:
         executor = ActionExecutor(phone)
@@ -352,14 +356,19 @@ def run_agent_loop(
 
             if sv_step.stop or sv_step.goal_completed:
                 # analysis 任务且有 content_notes → 二次校验
-                if context.task_type == "analysis" and context.content_notes:
+                if (
+                    context.task_type == "analysis"
+                    and context.content_notes
+                    and validation_retries < max_validation_retries
+                ):
                     print("  [校验] 数据充分性检查...")
-                    validation = validate_goal_completion(context.goal, context.content_notes)
+                    validation = validate_goal_completion(original_goal, context.content_notes)
                     if not validation.sufficient:
-                        print(f"  [校验] 数据不充分: {validation.missing}，继续执行")
-                        # 注入校验反馈到 goal，让 supervisor 知道缺少什么
+                        validation_retries += 1
+                        print(f"  [校验] 数据不充分 ({validation_retries}/{max_validation_retries}): {validation.missing}，继续执行")
+                        # 注入校验反馈到 goal（只追加一次，不重复）
                         context.goal = (
-                            f"{context.goal}\n\n"
+                            f"{original_goal}\n\n"
                             f"[校验反馈：之前收集的数据不完整——{validation.missing}，"
                             f"请换一种方式获取所需数据。]"
                         )
@@ -372,7 +381,7 @@ def run_agent_loop(
                 reason = sv_step.stop_reason or "目标已达成"
                 print(f"\n目标已达成：{reason}")
                 context.output = emit_final_output(
-                    context.goal,
+                    original_goal,
                     supervisor.name,
                     context.turns,
                     log_dir,
@@ -396,7 +405,22 @@ def run_agent_loop(
 
             if not sv_step.should_act:
                 # milestone 完成 / 未执行动作 → 自动继续下一轮，不暂停
+                noop_count += 1
+                if noop_count >= 3:
+                    print(f"\n连续 {noop_count} 轮无动作，agent-loop 停止")
+                    context.output = emit_final_output(
+                        original_goal,
+                        supervisor.name,
+                        context.turns,
+                        log_dir,
+                        f"连续 {noop_count} 轮无动作",
+                        content_notes=context.content_notes or None,
+                    )
+                    _save_context(context_path, context)
+                    return
                 continue
+
+            noop_count = 0  # 有动作则重置计数
 
             if auto_continue:
                 time.sleep(1.5)
