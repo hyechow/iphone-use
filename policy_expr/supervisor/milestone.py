@@ -170,7 +170,7 @@ CHECKER_PROMPT = """\
 - visible_evidence: 截图中支持 done 的可见证据列表（done 时必填）
 - missing_evidence: 截图中缺失的验收证据列表
 - summary: 当前屏幕状态一句话描述
-- read_instruction: 仅 task_type=analysis 时填写——描述当前页面需要提取的具体内容（如"提取页面上所有商品名称和价格"）；task_type=action 时必须留空
+- read_instruction: task_type=analysis 时，无论 status 为何值（done/in_progress/stuck），只要当前页面有与用户目标相关的可提取内容，都应填写——描述需要提取的具体内容（如"提取页面上所有商品名称和价格"）；task_type=action 时必须留空
 """
 
 PLAN_PROMPT = """\
@@ -348,6 +348,7 @@ class MilestoneSupervisorPolicy:
         rep_stuck = self._check_instruction_repetition(history) if not sim_stuck and not is_browsing else None
         check = sim_stuck or rep_stuck or self._check(milestone, observation, history)
         print(f"  [Checker] {check.status}: {check.reason}")
+        read_inst = check.read_instruction if hasattr(check, "read_instruction") else None
 
         if check.status == "done":
             done_name = milestone.name
@@ -363,6 +364,7 @@ class MilestoneSupervisorPolicy:
                     stop_reason="所有子目标已完成",
                     goal_completed=True,
                     summary=f"子目标「{done_name}」已完成，任务全部完成。",
+                    read_instruction=read_inst or None,
                 )
 
             # 直接为新 milestone 规划第一步，下一轮再让 checker 验收
@@ -402,6 +404,7 @@ class MilestoneSupervisorPolicy:
                                 f"子目标「{done_name}」已完成，"
                                 f"子目标「{next_name}」也已满足，任务全部完成。"
                             ),
+                            read_instruction=read_inst or next_check.read_instruction or None,
                         )
                     following = self._milestones[self._current_id]
                     return SupervisorStep(
@@ -412,6 +415,7 @@ class MilestoneSupervisorPolicy:
                             f"子目标「{done_name}」已完成，"
                             f"子目标「{next_name}」也已满足，开始执行「{following.name}」。"
                         ),
+                        read_instruction=read_inst or next_check.read_instruction or None,
                     )
                 plan = self._plan(
                     next_ms,
@@ -430,6 +434,7 @@ class MilestoneSupervisorPolicy:
                 stop=False,
                 goal_completed=False,
                 summary=f"子目标「{done_name}」已完成。{plan.summary}",
+                read_instruction=read_inst or None,
             )
 
         if check.status == "stuck":
@@ -450,12 +455,14 @@ class MilestoneSupervisorPolicy:
                         ),
                         goal_completed=False,
                         summary=check.reason,
+                        read_instruction=read_inst or None,
                     )
                 return SupervisorStep(
                     should_act=False,
                     stop=False,
                     goal_completed=False,
                     summary=f"子目标「{milestone.name}」失败，跳过继续下一个。",
+                    read_instruction=read_inst or None,
                 )
 
             # ── Replanner ──
@@ -484,6 +491,7 @@ class MilestoneSupervisorPolicy:
                     stop_reason=replan.escalation_message or "升级人工介入",
                     goal_completed=False,
                     summary=replan.diagnosis,
+                    read_instruction=read_inst or None,
                 )
 
             milestone.status = "running"
@@ -496,6 +504,7 @@ class MilestoneSupervisorPolicy:
                     f"子目标「{milestone.name}」卡住，"
                     f"第 {milestone.retry_count} 次重试。{replan.diagnosis}"
                 ),
+                read_instruction=read_inst or None,
             )
 
         # in_progress ── Planner generates the next single-step instruction ──
@@ -516,6 +525,7 @@ class MilestoneSupervisorPolicy:
                 goal_completed=False,
                 summary="浏览里程碑：继续滚动浏览内容",
                 preformed_action=history[-1].action_decision,
+                read_instruction=read_inst or None,
             )
 
         plan = self._plan(milestone, check, observation, history)
@@ -539,7 +549,7 @@ class MilestoneSupervisorPolicy:
             stop=False,
             goal_completed=False,
             summary=plan.summary,
-            read_instruction=check.read_instruction or None,
+            read_instruction=read_inst or None,
         )
 
     # ── Internal helpers ──────────────────────────────────────────────
