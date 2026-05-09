@@ -50,13 +50,23 @@ def invoke_structured(
     except (BadRequestError, ValidationError, ValueError) as exc:
         print(f"json_object 模式失败（{type(exc).__name__}）: {exc}，改用纯文本 JSON 解析...")
 
-    # Fallback: plain text, let model output JSON freely
-    response = _invoke_counted_with_retry(
-        lambda: llm.invoke(msgs),
-        label="json text fallback",
-    )
-    content = _message_text(response.content)
-    return schema.model_validate_json(_extract_json_object(content))
+    # Fallback: plain text, let model output JSON freely (retry once on parse failure)
+    for fallback_attempt in range(2):
+        response = _invoke_counted_with_retry(
+            lambda: llm.invoke(msgs),
+            label="json text fallback",
+        )
+        content = _message_text(response.content)
+        try:
+            return schema.model_validate_json(_extract_json_object(content))
+        except (ValidationError, ValueError) as exc:
+            if fallback_attempt == 0:
+                print(f"  fallback 解析失败，重试一次...")
+                continue
+            raise ValueError(
+                f"结构化输出解析失败（primary + fallback 均失败）: {exc}\n"
+                f"模型原始输出: {content[:500]}"
+            ) from exc
 
 
 def _invoke_counted_with_retry(fn: Callable[[], ReturnT], label: str) -> ReturnT:
