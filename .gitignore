@@ -7,3 +7,4 @@ images/
 logs/
 debug.log
 bin/
+tmp_scripts/

@@ -175,8 +175,9 @@ def emit_final_output(
     log_dir: Path,
     stop_reason: str,
     content_notes: list[str] | None = None,
+    collection_context: str | None = None,
 ) -> str:
-    output = render_final_output(goal, policy_name, turns, log_dir, stop_reason, content_notes)
+    output = render_final_output(goal, policy_name, turns, log_dir, stop_reason, content_notes, collection_context)
     print("\n" + "=" * 50)
     print("最终输出")
     print("=" * 50)
@@ -403,7 +404,10 @@ def run_agent_loop(
                     and validation_retries < max_validation_retries
                 ):
                     print("  [校验] 数据充分性检查...")
-                    validation = validate_goal_completion(original_goal, context.content_notes)
+                    validation = validate_goal_completion(
+                        original_goal, context.content_notes,
+                        collection_context=sv_step.collection_summary,
+                    )
                     if not validation.sufficient:
                         validation_retries += 1
                         if not _supervisor_has_active_work(supervisor):
@@ -424,6 +428,7 @@ def run_agent_loop(
                                 log_dir,
                                 reason,
                                 content_notes=context.content_notes or None,
+                                collection_context=sv_step.collection_summary,
                             )
                             _save_context(context_path, context)
                             return
@@ -456,6 +461,7 @@ def run_agent_loop(
                     log_dir,
                     reason,
                     content_notes=context.content_notes or None,
+                    collection_context=sv_step.collection_summary,
                 )
                 _save_context(context_path, context)
                 return

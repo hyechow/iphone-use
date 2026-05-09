@@ -7,6 +7,10 @@ llm:
   supervisor:
     provider: dashscope
     model: qwen3.5-35b-a3b
+    decompose:
+      # 任务分解——只在开始时调用一次，建议用更强的模型
+      provider: dashscope
+      model: qwen3.5-35b-a3b
   reader:
     provider: dashscope
     model: qwen3.5-flash

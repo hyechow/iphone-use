@@ -52,6 +52,7 @@ def render_final_output(
     log_dir: Path,
     stop_reason: str,
     content_notes: list[str] | None = None,
+    collection_context: str | None = None,
 ) -> str:
     """Use an LLM to render a concise final summary for a finished policy run."""
 
@@ -64,6 +65,8 @@ def render_final_output(
 
     if content_notes:
         notes_text = "\n\n".join(f"[片段 {i+1}]\n{note}" for i, note in enumerate(content_notes))
+        if collection_context:
+            notes_text = f"[采集上下文] {collection_context}\n\n以下为逐帧提取的内容片段：\n\n{notes_text}"
         messages = [
             SystemMessage(content=ANALYSIS_SYSTEM_PROMPT),
             HumanMessage(
@@ -127,11 +130,13 @@ VALIDATION_PROMPT = """\
 """
 
 
-def validate_goal_completion(goal: str, content_notes: list[str]) -> GoalValidationResult:
+def validate_goal_completion(goal: str, content_notes: list[str], collection_context: str | None = None) -> GoalValidationResult:
     """独立 LLM 校验：收集到的数据是否充分回答了用户目标。"""
     cfg = resolve_llm_config("output")
     llm = ChatOpenAI(model=cfg.model, api_key=cfg.api_key, base_url=cfg.base_url)
     notes_text = "\n\n".join(f"[片段 {i+1}]\n{note}" for i, note in enumerate(content_notes))
+    if collection_context:
+        notes_text = f"[采集上下文] {collection_context}\n\n以下为逐帧提取的内容片段：\n\n{notes_text}"
     messages = [
         SystemMessage(content="你是数据充分性校验助手。"),
         HumanMessage(content=VALIDATION_PROMPT.format(goal=goal, notes_text=notes_text)),

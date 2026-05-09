@@ -21,6 +21,7 @@ load_dotenv()
 MAX_RETRIES = 3
 STUCK_SCREEN_WINDOW = 3
 STUCK_SCREEN_SIMILARITY = 0.95
+STUCK_SCREEN_FROZEN = 0.99
 STUCK_REPEAT_WINDOW = 3
 STUCK_REPEAT_WORD_OVERLAP = 0.85
 
@@ -41,6 +42,7 @@ class _SingleCheckResult(BaseModel):
         default=None,
         description="kind=collection(read_once) 或 kind=verification 时填写：当前屏幕需要提取的内容说明；其他类型留空",
     )
+    frozen: bool = Field(default=False, description="屏幕是否冻结（相似度≥99%，即使 reader 返回新内容也应停止）")
 
 
 class _LoopFrameResult(BaseModel):
@@ -64,6 +66,12 @@ class _ReplanResult(BaseModel):
     instruction: str = Field(default="")
     escalation_message: str = Field(default="")
     can_degrade_to_collection: bool = Field(default=False)
+
+
+class _StopConditionPatch(BaseModel):
+    scroll_stop_condition: str = Field(
+        description="一句话描述何时应停止滚动，例如：「当可见记录日期早于2026-05-03时停止」"
+    )
 
 
 class _DecomposeResponse(BaseModel):
@@ -279,6 +287,19 @@ REPLAN_PROMPT = """\
 - 滚动指令描述要查看什么内容，不要指定手指方向
 """
 
+STOP_CONDITION_PATCH_PROMPT = """\
+你是 iPhone 自动化任务的规划助手。一个需要滚动采集的子目标需要生成停止条件。
+
+根据用户目标、本子目标的验收条件、以及前置子目标的验收条件，推导出停止滚动的边界。
+停止条件必须从验收条件中的筛选维度推导——如果前置验收条件限定了时间范围，停止条件就用时间边界；如果限定了关键词，就用关键词边界。
+
+规则：
+- 输出一句话描述何时停止滚动
+- 必须从验收条件的约束维度推导，不能泛化为"滚动至列表物理底部"
+- 如果验收条件限定时间范围，停止条件必须包含对应日期边界
+- 如果验收条件限定关键词/类别，停止条件必须包含对应的消失条件
+- 只有没有任何筛选约束的全量采集，才使用"滚动至列表物理底部时停止"
+"""
 
 # ── History formatter ─────────────────────────────────────────────────
 
@@ -397,10 +418,13 @@ class MilestoneSupervisorPolicy:
             and history[-1].supervisor.milestone_id == milestone.id
             and history[-1].read_added_content
         )
-        if sim_stuck and not last_read_added:
-            print("  [Loop] 截图连续无变化且无新增内容 → 判为边界，结束收集")
-            return self._advance(milestone, observation, history)
         if sim_stuck:
+            if sim_stuck.frozen:
+                print("  [Loop] 屏幕冻结（≥99%），即使 reader 返回新内容也结束收集")
+                return self._advance(milestone, observation, history)
+            if not last_read_added:
+                print("  [Loop] 截图连续无变化且无新增内容 → 判为边界，结束收集")
+                return self._advance(milestone, observation, history)
             print("  [Loop] 截图相似但上一轮读到了新内容，继续收集")
 
         # Per-frame assessment
@@ -414,7 +438,16 @@ class MilestoneSupervisorPolicy:
         if frame.should_stop:
             if _has_collected(history, milestone.id):
                 print("  [Loop] 已触发停止条件且有采集内容 → 结束收集")
-                return self._advance(milestone, observation, history)
+                final_read = _ctx(milestone, read_inst, frame.collection_scope)
+                if milestone.scroll_stop_condition:
+                    final_read["collection_summary"] = (
+                        f"停止条件「{milestone.scroll_stop_condition}」已触发"
+                        f"（{frame.stop_reason}）"
+                    )
+                return self._advance(
+                    milestone, observation, history,
+                    final_read=final_read,
+                )
             stuck = _SingleCheckResult(
                 status="stuck",
                 reason=f"停止条件已触发但尚未采集到目标内容：{frame.stop_reason}",
@@ -469,6 +502,7 @@ class MilestoneSupervisorPolicy:
         milestone: Milestone,
         observation: Observation,
         history: list[PolicyTurn],
+        final_read: Optional[dict] = None,
     ) -> SupervisorStep:
         """Mark milestone done, route immediately to next milestone's machine."""
         done_name = milestone.name
@@ -481,6 +515,7 @@ class MilestoneSupervisorPolicy:
             return SupervisorStep(
                 should_act=False, stop=True, stop_reason="所有子目标已完成",
                 goal_completed=True, summary=f"子目标「{done_name}」已完成，任务全部完成。",
+                **(final_read or {}),
             )
 
         next_ms = self._milestones[self._current_id]
@@ -742,15 +777,21 @@ class MilestoneSupervisorPolicy:
 
         current = self._recent_screenshots[-1]
         sims = [_png_sim(current, p) for p in self._recent_screenshots[:-1]]
+        max_sim = max(sims)
         if all(s >= STUCK_SCREEN_SIMILARITY for s in sims):
             sim_str = ", ".join(f"{s:.2%}" for s in sims)
-            print(f"  [SimStuck] {sim_str} → 截图连续无变化")
+            frozen = max_sim >= STUCK_SCREEN_FROZEN
+            if frozen:
+                print(f"  [SimStuck] {sim_str} → 屏幕冻结（≥{STUCK_SCREEN_FROZEN:.0%}）")
+            else:
+                print(f"  [SimStuck] {sim_str} → 截图连续无变化")
             return _SingleCheckResult(
                 status="stuck",
                 reason=f"连续 {STUCK_SCREEN_WINDOW} 帧截图相似度 [{sim_str}]，屏幕无实质变化",
                 stuck_reason="连续帧高度相似，上一步操作未生效",
                 issues=["屏幕像素变化低于阈值"],
                 summary="屏幕连续无变化",
+                frozen=frozen,
             )
         sim_2back = _png_sim(self._recent_screenshots[-1], self._recent_screenshots[-3])
         sim_adj = _png_sim(self._recent_screenshots[-1], self._recent_screenshots[-2])
@@ -798,27 +839,205 @@ class MilestoneSupervisorPolicy:
 
     # ── Decompose & routing ───────────────────────────────────────────
 
+    _MAX_DECOMPOSE_RETRIES = 2
+
     def _decompose(self, goal: str, observation: Observation) -> None:
-        cfg = resolve_llm_config("supervisor")
+        cfg = resolve_llm_config("supervisor.decompose")
+        if not cfg.model:
+            cfg = resolve_llm_config("supervisor")
         print(f"Supervisor: {cfg.provider} / {cfg.model}")
         llm = ChatOpenAI(model=cfg.model, api_key=cfg.api_key, base_url=cfg.base_url)
-        msgs = self._msgs(DECOMPOSE_PROMPT, observation)
-        msgs[1].content.insert(0, {"type": "text", "text": f"用户任务：{goal}"})
-        resp = invoke_structured(llm, msgs, _DecomposeResponse)
 
-        self._global_constraints = resp.global_constraints
-        self.task_type = resp.task_type
-        for m in resp.milestones:
-            self._milestones[m.id] = m
-        self._order = [m.id for m in resp.milestones]
-        self._current_id = self._next_milestone()
+        # Decompose → validate → retry with feedback if needed
+        issues: list[str] = []
+        for attempt in range(self._MAX_DECOMPOSE_RETRIES + 1):
+            self._do_decompose(llm, goal, observation, issues)
+            issues = self._validate_decomposition(goal)
+            if not issues:
+                break
+            if attempt < self._MAX_DECOMPOSE_RETRIES:
+                print(f"  [Guard] 分解校验发现 {len(issues)} 项问题，重试 ({attempt+1}/{self._MAX_DECOMPOSE_RETRIES})...")
+                for i in issues:
+                    print(f"  [Guard]   {i}")
+
+        # Final structural fixes for anything the retry couldn't resolve
+        self._patch_decomposition(llm, goal)
 
         print(f"任务分解为 {len(self._milestones)} 个子目标：")
-        for m in resp.milestones:
+        for mid in self._order:
+            m = self._milestones[mid]
             deps = f" (依赖: {m.depends_on})" if m.depends_on else ""
             machine = "loop" if _is_loop(m) else "single"
             print(f"  [{m.id}][{machine}] {m.name}{deps}")
             print(f"       验收：{m.success_condition}")
+            if m.scroll_stop_condition:
+                print(f"       停止条件：{m.scroll_stop_condition}")
+
+    def _do_decompose(
+        self, llm: ChatOpenAI, goal: str, observation: Observation,
+        feedback: list[str],
+    ) -> None:
+        msgs = self._msgs(DECOMPOSE_PROMPT, observation)
+        user_parts: list[dict] = [{"type": "text", "text": f"用户任务：{goal}"}]
+        if feedback:
+            fb = "\n".join(f"  - {i}" for i in feedback)
+            user_parts.append({"type": "text", "text": f"\n上一轮分解存在以下问题，请修正：\n{fb}"})
+        msgs[1].content = user_parts + msgs[1].content
+        resp = invoke_structured(llm, msgs, _DecomposeResponse)
+
+        self._global_constraints = resp.global_constraints
+        self.task_type = resp.task_type
+        self._milestones = {m.id: m for m in resp.milestones}
+        self._order = [m.id for m in resp.milestones]
+        self._current_id = self._next_milestone()
+
+    def _validate_decomposition(self, goal: str) -> list[str]:
+        """Check all invariants WITHOUT modifying state. Returns list of issues."""
+        issues = []
+        all_ids = set(self._milestones.keys())
+
+        # 1. depends_on references must exist
+        for m in self._milestones.values():
+            for dep in m.depends_on:
+                if dep not in all_ids:
+                    issues.append(f"子目标「{m.name}」的 depends_on 包含不存在的 ID: {dep}")
+
+        # 2. DAG must not have cycles
+        visited: set[str] = set()
+        in_stack: set[str] = set()
+        def _has_cycle(mid: str) -> bool:
+            if mid in in_stack:
+                return True
+            if mid in visited:
+                return False
+            visited.add(mid)
+            in_stack.add(mid)
+            ms = self._milestones.get(mid)
+            if ms:
+                for dep in ms.depends_on:
+                    if _has_cycle(dep):
+                        return True
+            in_stack.discard(mid)
+            return False
+        for mid in list(self._order):
+            visited.clear()
+            in_stack.clear()
+            if _has_cycle(mid):
+                issues.append(f"子目标之间存在循环依赖（从 {mid} 开始）")
+
+        # 3. success_condition must not be empty
+        for m in self._milestones.values():
+            if not m.success_condition.strip():
+                issues.append(f"子目标「{m.name}」的验收条件为空")
+
+        # 4. kind=collection must pair with read_once or scroll_until_boundary
+        for m in self._milestones.values():
+            if m.kind == "collection" and m.completion_strategy not in ("read_once", "scroll_until_boundary"):
+                issues.append(f"子目标「{m.name}」kind=collection 但 completion_strategy={m.completion_strategy}，应为 read_once 或 scroll_until_boundary")
+
+        # 5. scroll_until_boundary must have scroll_stop_condition
+        for m in self._milestones.values():
+            if m.completion_strategy == "scroll_until_boundary" and not m.scroll_stop_condition:
+                issues.append(f"子目标「{m.name}」使用 scroll_until_boundary 但缺少 scroll_stop_condition")
+
+        # 6. task_type heuristic
+        analysis_keywords = ("多少", "什么", "有没有", "查看", "看看", "统计", "查一下", "帮我找", "列出", "汇总", "比较")
+        if self.task_type == "action" and any(kw in goal for kw in analysis_keywords):
+            issues.append(f"task_type=action 但目标含查询关键词（{', '.join(kw for kw in analysis_keywords if kw in goal)}），应为 analysis")
+
+        return issues
+
+    def _patch_decomposition(self, llm: ChatOpenAI, goal: str) -> None:
+        """Apply structural fixes for issues that survive retry. Last resort."""
+        fixes = []
+
+        # 1. Remove invalid depends_on
+        all_ids = set(self._milestones.keys())
+        for m in self._milestones.values():
+            invalid = [d for d in m.depends_on if d not in all_ids]
+            if invalid:
+                m.depends_on = [d for d in m.depends_on if d in all_ids]
+                fixes.append(f"子目标「{m.name}」移除无效依赖 {invalid}")
+
+        # 2. Break cycles
+        visited: set[str] = set()
+        in_stack: set[str] = set()
+        def _has_cycle(mid: str) -> bool:
+            if mid in in_stack:
+                return True
+            if mid in visited:
+                return False
+            visited.add(mid)
+            in_stack.add(mid)
+            ms = self._milestones.get(mid)
+            if ms:
+                for dep in ms.depends_on:
+                    if _has_cycle(dep):
+                        return True
+            in_stack.discard(mid)
+            return False
+        for mid in self._order:
+            visited.clear()
+            in_stack.clear()
+            if _has_cycle(mid):
+                self._milestones[mid].depends_on = []
+                fixes.append(f"清除子目标「{self._milestones[mid].name}」的依赖以打破循环")
+
+        # 3. Fill empty success_condition
+        for m in self._milestones.values():
+            if not m.success_condition.strip():
+                m.success_condition = f"完成「{m.name}」"
+                fixes.append(f"子目标「{m.name}」补全空的验收条件")
+
+        # 4. Fix collection completion_strategy
+        for m in self._milestones.values():
+            if m.kind == "collection" and m.completion_strategy not in ("read_once", "scroll_until_boundary"):
+                m.completion_strategy = "scroll_until_boundary"
+                fixes.append(f"子目标「{m.name}」策略修正为 scroll_until_boundary")
+
+        # 5. Fill missing scroll_stop_condition via LLM
+        needs_stop_condition = [
+            m for m in self._milestones.values()
+            if m.completion_strategy == "scroll_until_boundary" and not m.scroll_stop_condition
+        ]
+        for m in needs_stop_condition:
+            dep_context = ""
+            if m.depends_on:
+                dep_lines = []
+                for dep_id in m.depends_on:
+                    dep = self._milestones.get(dep_id)
+                    if dep:
+                        dep_lines.append(f"  - 前置子目标「{dep.name}」验收条件：{dep.success_condition}")
+                if dep_lines:
+                    dep_context = "\n".join(dep_lines)
+            patch = invoke_structured(
+                llm,
+                [
+                    SystemMessage(content=STOP_CONDITION_PATCH_PROMPT),
+                    HumanMessage(content=(
+                        f"用户目标：{goal}\n"
+                        f"子目标名称：{m.name}\n"
+                        f"子目标描述：{m.description}\n"
+                        f"本子目标验收条件：{m.success_condition}\n"
+                        f"{dep_context}\n"
+                        f"全局约束：{json.dumps(self._global_constraints, ensure_ascii=False)}"
+                    )),
+                ],
+                _StopConditionPatch,
+            )
+            m.scroll_stop_condition = patch.scroll_stop_condition
+            fixes.append(f"子目标「{m.name}」补全停止条件 → {m.scroll_stop_condition}")
+
+        # 6. Fix task_type
+        analysis_keywords = ("多少", "什么", "有没有", "查看", "看看", "统计", "查一下", "帮我找", "列出", "汇总", "比较")
+        if self.task_type == "action" and any(kw in goal for kw in analysis_keywords):
+            self.task_type = "analysis"
+            fixes.append("task_type 从 action 修正为 analysis")
+
+        if fixes:
+            print(f"  [Guard] 补丁修复 {len(fixes)} 项：")
+            for f in fixes:
+                print(f"  [Guard]   {f}")
 
     def _next_milestone(self) -> Optional[str]:
         for mid in self._order:

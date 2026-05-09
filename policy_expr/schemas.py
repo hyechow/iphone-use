@@ -129,6 +129,10 @@ class SupervisorStep(BaseModel):
     milestone_kind: Optional[MilestoneKind] = Field(default=None, description="当前子目标类型")
     completion_strategy: Optional[CompletionStrategy] = Field(default=None, description="当前子目标完成策略")
     collection_scope: Optional[CollectionScope] = Field(default=None, description="当前内容采集范围")
+    collection_summary: Optional[str] = Field(
+        default=None,
+        description="collection milestone 完成时的采集摘要（含停止条件及触发原因）",
+    )
 
 
 class GoalValidationResult(BaseModel):
