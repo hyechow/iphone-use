@@ -520,6 +520,16 @@ class MilestoneSupervisorPolicy:
 
         next_ms = self._milestones[self._current_id]
         print(f"  开始执行「{next_ms.name}」")
+
+        # If there's content to read from the completed milestone, return an
+        # intermediate step so the runner processes it before advancing.
+        if final_read:
+            return SupervisorStep(
+                should_act=False, stop=False, goal_completed=False,
+                summary=f"子目标「{done_name}」已完成，下一子目标「{next_ms.name}」待执行。",
+                **final_read,
+            )
+
         if _is_loop(next_ms):
             return self._run_loop_turn(next_ms, observation, history)
         return self._run_single_turn(next_ms, observation, history)
