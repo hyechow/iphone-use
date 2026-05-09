@@ -233,6 +233,8 @@ REPLAN_PROMPT = """\
 - 工具限制/数据问题 → local_replan，换一种操作方式
 - 重试次数 >= 3 → escalate_human
 - local_replan 的指令不能重复已失败的方案
+- 以下指令已经尝试过且失败，禁止再次使用，必须换一种完全不同的方式：
+{tried_instructions}
 - 如果失败子目标名称或验收条件明确要求「回到主屏幕 / 返回主屏幕 / 看到主屏幕」，local_replan 必须指令「按 Home 键返回主屏幕」；不要继续点击应用内返回按钮，也不要点击搜索、确认、商品等应用内控件
 - 区分「应用未成功启动」和「应用已打开但停在错误页面」，后者应通过应用内导航解决而非重新打开应用
 - instruction 必须只包含一个可执行操作，不能输出编号列表、操作序列或多个步骤
@@ -775,6 +777,15 @@ class MilestoneSupervisorPolicy:
     ) -> _ReplanResult:
         """Replanner: diagnose failure and generate fix strategy."""
         llm = self._make_replanner_llm()
+
+        # Extract previously tried instructions for this milestone
+        tried = sorted(set(
+            t.supervisor.instruction
+            for t in history
+            if t.supervisor and t.supervisor.instruction
+        ))
+        tried_text = "\n".join(f"  - 「{inst}」" for inst in tried) if tried else "  （无）"
+
         prompt = REPLAN_PROMPT.format(
             milestone_name=milestone.name,
             milestone_desc=milestone.description,
@@ -785,6 +796,7 @@ class MilestoneSupervisorPolicy:
             constraints=json.dumps(self._global_constraints, ensure_ascii=False),
             failure_hints=json.dumps(milestone.failure_hints, ensure_ascii=False),
             history_text=_format_history(history),
+            tried_instructions=tried_text,
         )
         if extra_instruction:
             prompt = f"{prompt}\n\n## 输出修正要求\n{extra_instruction}"
