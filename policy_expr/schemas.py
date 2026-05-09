@@ -95,6 +95,13 @@ class SupervisorStep(BaseModel):
     )
 
 
+class GoalValidationResult(BaseModel):
+    """Result of independent goal-completion validation."""
+
+    sufficient: bool = Field(description="已收集数据是否充分回答了用户目标")
+    missing: str = Field(default="", description="缺少什么（sufficient=false 时填写）")
+
+
 class Milestone(BaseModel):
     """A sub-goal in the task decomposition DAG."""
 

@@ -24,6 +24,7 @@ from policy_expr.policies import StructuredOutputPolicy
 from policy_expr.policies.base import ActionPolicy
 from policy_expr.schemas import (
     ActionDecision,
+    GoalValidationResult,
     Observation,
     PolicyContext,
     PolicyTurn,
@@ -67,6 +68,47 @@ def build_policy(name: str) -> ActionPolicy:
     except KeyError as exc:
         choices = ", ".join(sorted(POLICIES))
         raise ValueError(f"未知策略 {name!r}，可选：{choices}") from exc
+
+
+VALIDATION_PROMPT = """\
+判断以下收集到的数据片段是否充分回答了用户目标。
+
+用户目标：{goal}
+
+收集到的数据：
+{notes_text}
+
+要求：
+- 如果目标包含特定条件（如时间范围、金额范围、类别），检查数据是否满足这些条件
+- 如果数据范围与目标条件不匹配（如目标问"本周"但数据是"本月"），判定为不充分
+- 如果数据只是部分满足，也判定为不充分
+- 只有数据明确、完整地回答了用户目标时，才判定为充分
+
+输出 JSON：
+- sufficient: true/false
+- missing: 数据缺少什么（sufficient=false 时必填，sufficient=true 时留空）
+"""
+
+
+def validate_goal_completion(goal: str, content_notes: list[str]) -> GoalValidationResult:
+    """独立 LLM 校验：收集到的数据是否充分回答了用户目标。"""
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from langchain_openai import ChatOpenAI
+
+    from llm.structured import invoke_structured
+    from policy_expr.config import resolve_llm_config
+
+    cfg = resolve_llm_config("output")
+    llm = ChatOpenAI(model=cfg.model, api_key=cfg.api_key, base_url=cfg.base_url)
+
+    notes_text = "\n\n".join(f"[片段 {i+1}]\n{note}" for i, note in enumerate(content_notes))
+    prompt = VALIDATION_PROMPT.format(goal=goal, notes_text=notes_text)
+
+    messages = [
+        SystemMessage(content="你是数据充分性校验助手。"),
+        HumanMessage(content=prompt),
+    ]
+    return invoke_structured(llm, messages, GoalValidationResult)
 
 
 def build_supervisor(name: str) -> SupervisorPolicy:
@@ -309,6 +351,24 @@ def run_agent_loop(
             _print_turn_stats(turn_no, turn_started_at, llm_calls_before)
 
             if sv_step.stop or sv_step.goal_completed:
+                # analysis 任务且有 content_notes → 二次校验
+                if context.task_type == "analysis" and context.content_notes:
+                    print("  [校验] 数据充分性检查...")
+                    validation = validate_goal_completion(context.goal, context.content_notes)
+                    if not validation.sufficient:
+                        print(f"  [校验] 数据不充分: {validation.missing}，继续执行")
+                        # 注入校验反馈到 goal，让 supervisor 知道缺少什么
+                        context.goal = (
+                            f"{context.goal}\n\n"
+                            f"[校验反馈：之前收集的数据不完整——{validation.missing}，"
+                            f"请换一种方式获取所需数据。]"
+                        )
+                        # 回退本轮 turn 的完成标记
+                        turn.supervisor.stop = False
+                        turn.supervisor.goal_completed = False
+                        _save_context(context_path, context)
+                        continue
+
                 reason = sv_step.stop_reason or "目标已达成"
                 print(f"\n目标已达成：{reason}")
                 context.output = emit_final_output(
