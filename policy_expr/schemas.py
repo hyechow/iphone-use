@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, model_validator
 
 
 ActionType = Literal["tap", "click", "type", "scroll", "home", "stop"]
+TaskType = Literal["action", "analysis"]
 
 
 class Action(BaseModel):
@@ -85,6 +86,10 @@ class SupervisorStep(BaseModel):
         default=None,
         description="预生成的动作决策（设置后 runner 跳过 Action Policy 直接执行）",
     )
+    read_instruction: Optional[str] = Field(
+        default=None,
+        description="当前屏幕需要提取的内容说明（analysis 任务时由 Checker 填写）",
+    )
 
 
 class Milestone(BaseModel):
@@ -119,4 +124,6 @@ class PolicyContext(BaseModel):
     supervisor_policy_name: str
     action_policy_name: str
     turns: list[PolicyTurn] = Field(default_factory=list)
+    task_type: Optional[TaskType] = None
+    content_notes: list[str] = Field(default_factory=list)
     output: Optional[str] = None

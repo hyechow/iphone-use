@@ -3,7 +3,7 @@
 import base64
 import io
 import json
-from typing import Optional
+from typing import Literal, Optional
 
 from PIL import Image
 
@@ -32,6 +32,9 @@ class _DecomposeResponse(BaseModel):
     goal: str
     global_constraints: list[str] = Field(default_factory=list)
     milestones: list[Milestone]
+    task_type: Literal["action", "analysis"] = Field(
+        description="action=执行操作类任务；analysis=查找/提取/阅读信息类任务"
+    )
 
 
 class _CheckResult(BaseModel):
@@ -43,6 +46,10 @@ class _CheckResult(BaseModel):
     visible_evidence: list[str] = Field(default_factory=list, description="截图中支持 done 的可见证据")
     missing_evidence: list[str] = Field(default_factory=list, description="截图中缺失的验收证据")
     summary: str = Field(description="当前屏幕状态一句话描述")
+    read_instruction: Optional[str] = Field(
+        default=None,
+        description="analysis 任务时填写：当前页面需要提取的具体内容说明，action 任务留空",
+    )
 
 
 class _PlanResult(BaseModel):
@@ -71,6 +78,9 @@ DECOMPOSE_PROMPT = """\
 - goal：任务一句话描述
 - global_constraints：全局约束列表
 - milestones：子目标列表，每个包含 id/name/description/depends_on/success_condition/failure_hints
+- task_type：根据用户最终目的判断任务类型（注意：即使是 analysis 任务也需要执行打开应用、滚动等操作来获取信息，判断依据是用户是否需要你「返回信息」）
+  - action：用户要你在手机上执行一个具体操作并完成它，如发消息、打开应用、添加联系人、完成设置
+  - analysis：用户的目的是获取信息/回答问题/比较内容，如「花了多少钱」「XX和XX哪个便宜」「帮我看看」「总结一下」。即使用户需要你先打开某个应用才能看到内容，仍然是 analysis
 
 原则：
 1. 如果当前不在主屏幕，第一个子目标应为「回到主屏幕」，验收条件为「看到主屏幕（桌面图标界面）」
@@ -93,6 +103,7 @@ CHECKER_PROMPT = """\
 - 名称：{milestone_name}
 - 描述：{milestone_desc}
 - 验收条件：{success_condition}
+- 任务类型：{task_type}
 - 全局约束：{constraints}
 
 ## 历史操作记录
@@ -153,6 +164,7 @@ CHECKER_PROMPT = """\
 - visible_evidence: 截图中支持 done 的可见证据列表（done 时必填）
 - missing_evidence: 截图中缺失的验收证据列表
 - summary: 当前屏幕状态一句话描述
+- read_instruction: 仅 task_type=analysis 时填写——描述当前页面需要提取的具体内容（如"提取页面上所有商品名称和价格"）；task_type=action 时必须留空
 """
 
 PLAN_PROMPT = """\
@@ -290,6 +302,7 @@ class MilestoneSupervisorPolicy:
         self._current_id: Optional[str] = None
         self._initialized = False
         self._recent_screenshots: list[bytes] = []  # 用于截图相似度检测
+        self.task_type: Literal["action", "analysis"] = "action"
 
     def step(
         self,
@@ -520,6 +533,7 @@ class MilestoneSupervisorPolicy:
             stop=False,
             goal_completed=False,
             summary=plan.summary,
+            read_instruction=check.read_instruction or None,
         )
 
     # ── Internal helpers ──────────────────────────────────────────────
@@ -538,6 +552,7 @@ class MilestoneSupervisorPolicy:
         resp = invoke_structured(llm, messages, _DecomposeResponse)
 
         self._global_constraints = resp.global_constraints
+        self.task_type = resp.task_type
         for m in resp.milestones:
             self._milestones[m.id] = m
         self._order = [m.id for m in resp.milestones]
@@ -687,6 +702,7 @@ class MilestoneSupervisorPolicy:
             milestone_name=milestone.name,
             milestone_desc=milestone.description,
             success_condition=milestone.success_condition,
+            task_type=self.task_type,
             constraints=json.dumps(self._global_constraints, ensure_ascii=False),
             history_text=_format_history(history),
         )

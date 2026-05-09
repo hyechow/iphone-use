@@ -122,7 +122,7 @@ Task {
         }
         config.width = 636   // 318 * 2 Retina
         config.height = 1402 // 701 * 2 Retina
-        config.minimumFrameInterval = CMTime(value: 1, timescale: 10)
+        config.minimumFrameInterval = CMTime(value: 1, timescale: 1) // 1fps — low CPU
         config.showsCursor = false
 
         let server = FrameServer()
@@ -132,7 +132,7 @@ Task {
 
         try stream.addStreamOutput(
             server, type: .screen,
-            sampleHandlerQueue: DispatchQueue(label: "sck.frames", qos: .userInteractive)
+            sampleHandlerQueue: DispatchQueue(label: "sck.frames", qos: .utility)
         )
         try await stream.startCapture()
         fputs("Stream started — ready\n", stderr)
@@ -159,7 +159,7 @@ Task {
                 newConfig.sourceRect = w.frame
                 newConfig.width = 636
                 newConfig.height = 1402
-                newConfig.minimumFrameInterval = CMTime(value: 1, timescale: 10)
+                newConfig.minimumFrameInterval = CMTime(value: 1, timescale: 1)
                 newConfig.showsCursor = false
                 try? await stream.updateConfiguration(newConfig)
             }

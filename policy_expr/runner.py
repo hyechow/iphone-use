@@ -19,6 +19,7 @@ from policy_expr.supervisor import MilestoneSupervisorPolicy, SimpleSupervisorPo
 from policy_expr.supervisor.base import SupervisorPolicy
 from policy_expr.output import render_final_output
 from policy_expr.perception import LivePerception, LivePhoneSession
+from policy_expr.reader import ContentReader
 from policy_expr.policies import StructuredOutputPolicy
 from policy_expr.policies.base import ActionPolicy
 from policy_expr.schemas import (
@@ -102,8 +103,9 @@ def emit_final_output(
     turns: list[PolicyTurn],
     log_dir: Path,
     stop_reason: str,
+    content_notes: list[str] | None = None,
 ) -> str:
-    output = render_final_output(goal, policy_name, turns, log_dir, stop_reason)
+    output = render_final_output(goal, policy_name, turns, log_dir, stop_reason, content_notes)
     print("\n" + "=" * 50)
     print("最终输出")
     print("=" * 50)
@@ -206,6 +208,7 @@ def run_once(
             context.turns,
             log_dir,
             stop_reason,
+            content_notes=context.content_notes or None,
         )
         _save_context(context_path, context)
         _print_turn_stats(1, turn_started_at, llm_calls_before)
@@ -231,6 +234,8 @@ def run_agent_loop(
     print(f"Goal    : {context.goal}")
     print(f"Turns   : {len(context.turns)}")
 
+    reader = ContentReader()
+
     with LivePhoneSession() as phone:
         executor = ActionExecutor(phone)
 
@@ -252,6 +257,19 @@ def run_agent_loop(
             print("监督决策中...")
             sv_step = supervisor.step(observation, context.goal, context.turns)
             print(f"监督者: {sv_step.summary}")
+
+            # Sync task_type from supervisor after first decomposition
+            if hasattr(supervisor, "task_type") and context.task_type is None:
+                context.task_type = supervisor.task_type
+                print(f"任务类型: {context.task_type}")
+
+            # Content reading for analysis tasks
+            if sv_step.read_instruction:
+                print(f"读取内容: {sv_step.read_instruction}")
+                note = reader.read(observation.png_bytes, sv_step.read_instruction)
+                if note and note != "无相关内容":
+                    context.content_notes.append(note)
+                    print(f"内容摘要: {note[:80]}...")
 
             action_decision = None
             executed = False
@@ -299,6 +317,7 @@ def run_agent_loop(
                     context.turns,
                     log_dir,
                     reason,
+                    content_notes=context.content_notes or None,
                 )
                 _save_context(context_path, context)
                 return
@@ -310,6 +329,7 @@ def run_agent_loop(
                     context.turns,
                     log_dir,
                     "动作未执行，agent-loop 停止",
+                    content_notes=context.content_notes or None,
                 )
                 _save_context(context_path, context)
                 return
@@ -333,6 +353,7 @@ def run_agent_loop(
                     context.turns,
                     log_dir,
                     "用户退出 agent-loop",
+                    content_notes=context.content_notes or None,
                 )
                 _save_context(context_path, context)
                 return

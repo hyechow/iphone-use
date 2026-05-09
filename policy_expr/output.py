@@ -14,7 +14,7 @@ from policy_expr.schemas import PolicyTurn
 load_dotenv()
 
 
-SYSTEM_PROMPT = """\
+ACTION_SYSTEM_PROMPT = """\
 你是 iPhone 自动化任务的最终结果总结助手。
 你会收到一次策略运行的完整 context，包括用户目标、停止原因、每轮观察、动作、执行状态和验证结果。
 请基于这些事实判断任务最终状态，并用中文输出给用户看的简短摘要。
@@ -23,9 +23,22 @@ SYSTEM_PROMPT = """\
 - 不要输出详细 Markdown 报告，不要逐轮罗列日志。
 - 控制在 3-6 句话。
 - 必须说明任务是否已完成、关键依据。
-- 如果 context 无法确认完成，不要猜测，明确说“未确认”或“未完成”。
+- 如果 context 无法确认完成，不要猜测，明确说"未确认"或"未完成"。
 - 不要提及停止原因、运行模式、日志目录或日志保存位置。
-- 不要在结尾追加“任务因...停止”“完整日志保存在...”之类的运行说明。
+- 不要在结尾追加"任务因...停止""完整日志保存在..."之类的运行说明。
+"""
+
+ANALYSIS_SYSTEM_PROMPT = """\
+你是 iPhone 信息收集任务的最终结果整理助手。
+用户让 agent 在手机上浏览并收集信息，agent 已逐页提取了相关内容片段。
+你的任务是将这些片段整合成一份直接回答用户目标的简洁报告。
+
+要求：
+- 直接呈现收集到的信息内容，不要描述 agent 的操作过程。
+- 合并重复内容，保留关键细节。
+- 如果信息不完整，如实说明，不要补充截图中没有的内容。
+- 不要提及"agent"、"截图"、"收集"等操作性词汇，直接给出答案。
+- 不要在结尾追加运行说明。
 """
 
 
@@ -35,6 +48,7 @@ def render_final_output(
     turns: Sequence[PolicyTurn],
     log_dir: Path,
     stop_reason: str,
+    content_notes: list[str] | None = None,
 ) -> str:
     """Use an LLM to render a concise final summary for a finished policy run."""
 
@@ -44,16 +58,30 @@ def render_final_output(
         api_key=cfg.api_key,
         base_url=cfg.base_url,
     )
-    context = _build_output_context(goal, policy_name, turns, log_dir, stop_reason)
-    messages = [
-        SystemMessage(content=SYSTEM_PROMPT),
-        HumanMessage(
-            content=(
-                "请根据以下完整运行 context 生成最终摘要：\n"
-                f"{json.dumps(context, ensure_ascii=False, indent=2)}"
-            )
-        ),
-    ]
+
+    if content_notes:
+        notes_text = "\n\n".join(f"[片段 {i+1}]\n{note}" for i, note in enumerate(content_notes))
+        messages = [
+            SystemMessage(content=ANALYSIS_SYSTEM_PROMPT),
+            HumanMessage(
+                content=(
+                    f"用户目标：{goal}\n\n"
+                    f"收集到的内容片段：\n{notes_text}"
+                )
+            ),
+        ]
+    else:
+        context = _build_output_context(goal, policy_name, turns, log_dir, stop_reason)
+        messages = [
+            SystemMessage(content=ACTION_SYSTEM_PROMPT),
+            HumanMessage(
+                content=(
+                    "请根据以下完整运行 context 生成最终摘要：\n"
+                    f"{json.dumps(context, ensure_ascii=False, indent=2)}"
+                )
+            ),
+        ]
+
     response = llm.invoke(messages)
     return _message_text(response.content).strip() + "\n"
 
