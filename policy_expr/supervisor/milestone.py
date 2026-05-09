@@ -33,7 +33,12 @@ class _DecomposeResponse(BaseModel):
     global_constraints: list[str] = Field(default_factory=list)
     milestones: list[Milestone]
     task_type: Literal["action", "analysis"] = Field(
-        description="action=执行操作类任务；analysis=查找/提取/阅读信息类任务"
+        description=(
+            "判断标准：用户最终是否需要你返回信息/回答问题。"
+            "用户在提问（花了多少、哪个便宜、帮我看看、总结一下、有什么消息）= analysis。"
+            "用户要求执行具体操作并完成（发消息、打开app、修改设置）= action。"
+            "默认偏向 analysis——有疑问时选 analysis"
+        )
     )
 
 
@@ -78,9 +83,10 @@ DECOMPOSE_PROMPT = """\
 - goal：任务一句话描述
 - global_constraints：全局约束列表
 - milestones：子目标列表，每个包含 id/name/description/depends_on/success_condition/failure_hints
-- task_type：根据用户最终目的判断任务类型（注意：即使是 analysis 任务也需要执行打开应用、滚动等操作来获取信息，判断依据是用户是否需要你「返回信息」）
-  - action：用户要你在手机上执行一个具体操作并完成它，如发消息、打开应用、添加联系人、完成设置
-  - analysis：用户的目的是获取信息/回答问题/比较内容，如「花了多少钱」「XX和XX哪个便宜」「帮我看看」「总结一下」。即使用户需要你先打开某个应用才能看到内容，仍然是 analysis
+- task_type：根据用户最终目的判断任务类型
+  - action：用户要求你在手机上执行并完成一个具体操作，如「发消息给张三」「打开微信通讯录」「把深色模式打开」
+  - analysis：用户在提问、要你查看/比较/总结信息，如「花了多少钱」「哪个便宜」「帮我看看朋友圈」「总结一下群里消息」
+  - 关键：analysis 任务仍然需要执行操作（打开app、导航、滚动）来获取信息，判断依据是用户最终要不要你「回答/返回信息」。有疑问时选 analysis
 
 原则：
 1. 如果当前不在主屏幕，第一个子目标应为「回到主屏幕」，验收条件为「看到主屏幕（桌面图标界面）」
