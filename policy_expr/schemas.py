@@ -8,6 +8,23 @@ from pydantic import BaseModel, Field, model_validator
 
 ActionType = Literal["tap", "click", "type", "scroll", "home", "stop"]
 TaskType = Literal["action", "analysis"]
+MilestoneKind = Literal["navigation", "filter", "collection", "action", "verification"]
+CompletionStrategy = Literal[
+    "visible_once",
+    "read_once",
+    "scroll_until_boundary",
+    "repeat_until_satisfied",
+    "human_escalation",
+]
+
+
+class CollectionScope(BaseModel):
+    """Structured scope for collected content."""
+
+    label: str = Field(default="", description="范围标签，如目标范围、当前分组、自定义条件")
+    start: Optional[str] = Field(default=None, description="范围开始值；不可确定则为空")
+    end: Optional[str] = Field(default=None, description="范围结束值；不可确定则为空")
+    evidence: list[str] = Field(default_factory=list, description="截图中支持该范围的可见证据")
 
 
 class Action(BaseModel):
@@ -19,11 +36,25 @@ class Action(BaseModel):
         """Unpack x: [x, y] into separate x/y fields (model sometimes uses list coords)."""
         if isinstance(data, dict):
             x = data.get("x")
-            if isinstance(x, list) and len(x) == 2 and "y" not in data:
-                return {**data, "x": x[0], "y": x[1]}
+            y = data.get("y")
+            if isinstance(x, list) and len(x) == 2:
+                data = {**data, "x": x[0]}
+                if not isinstance(y, (int, float)):
+                    data["y"] = x[1]
+            if isinstance(data.get("x"), list) and len(data["x"]) == 1:
+                data = {**data, "x": data["x"][0]}
+            if isinstance(data.get("y"), list) and len(data["y"]) == 1:
+                data = {**data, "y": data["y"][0]}
             # 常见 LLM 别名：click → tap
             if data.get("action_type") == "click":
                 data["action_type"] = "tap"
+            if not data.get("description"):
+                action_type = data.get("action_type") or "操作"
+                text = data.get("text")
+                if text:
+                    data["description"] = f"执行{action_type}并输入{text}"
+                else:
+                    data["description"] = f"执行{action_type}操作"
             # Clamp scroll y to avoid edge dead zones
             if data.get("action_type") == "scroll" and "y" in data and data["y"] is not None:
                 data["y"] = max(200, min(float(data["y"]), 850))
@@ -48,7 +79,7 @@ class Action(BaseModel):
         default=None,
         description="要输入的文字内容（action_type 为 type 时必填）",
     )
-    description: str = Field(description="该操作的中文说明，如「点击微信图标」")
+    description: str = Field(description="该操作的中文说明，如「点击目标应用图标」")
 
 
 class Observation(BaseModel):
@@ -93,6 +124,11 @@ class SupervisorStep(BaseModel):
         default=None,
         description="当前屏幕需要提取的内容说明（analysis 任务时由 Checker 填写）",
     )
+    allow_read: bool = Field(default=False, description="是否允许 runner 将读取结果写入 content_notes")
+    milestone_id: Optional[str] = Field(default=None, description="当前子目标 ID")
+    milestone_kind: Optional[MilestoneKind] = Field(default=None, description="当前子目标类型")
+    completion_strategy: Optional[CompletionStrategy] = Field(default=None, description="当前子目标完成策略")
+    collection_scope: Optional[CollectionScope] = Field(default=None, description="当前内容采集范围")
 
 
 class GoalValidationResult(BaseModel):
@@ -105,11 +141,75 @@ class GoalValidationResult(BaseModel):
 class Milestone(BaseModel):
     """A sub-goal in the task decomposition DAG."""
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_kind_and_strategy(cls, data: object) -> object:
+        """Normalize common LLM aliases for milestone intent fields."""
+        if isinstance(data, dict):
+            kind_aliases = {
+                "analysis": "verification",
+                "analyze": "verification",
+                "summary": "verification",
+                "summarize": "verification",
+                "report": "verification",
+                "read": "collection",
+                "reading": "collection",
+                "collect": "collection",
+                "data_collection": "collection",
+                "browse": "collection",
+                "navigation": "navigation",
+                "navigate": "navigation",
+                "filtering": "filter",
+                "search": "filter",
+            }
+            strategy_aliases = {
+                "scroll": "scroll_until_boundary",
+                "scroll_until_end": "scroll_until_boundary",
+                "scroll_to_bottom": "scroll_until_boundary",
+                "read": "read_once",
+                "read_visible": "read_once",
+                "once": "visible_once",
+                "visible": "visible_once",
+                "manual": "human_escalation",
+            }
+            kind = data.get("kind")
+            strategy = data.get("completion_strategy")
+            normalized = dict(data)
+            if isinstance(kind, str):
+                normalized["kind"] = kind_aliases.get(kind.strip().lower(), kind)
+            if isinstance(strategy, str):
+                normalized["completion_strategy"] = strategy_aliases.get(
+                    strategy.strip().lower(), strategy
+                )
+            return normalized
+        return data
+
     id: str
     name: str
     description: str
     depends_on: list[str] = Field(default_factory=list)
     success_condition: str
+    kind: MilestoneKind = Field(
+        default="action",
+        description="navigation | filter | collection | action | verification",
+    )
+    completion_strategy: CompletionStrategy = Field(
+        default="visible_once",
+        description=(
+            "visible_once | read_once | scroll_until_boundary | "
+            "repeat_until_satisfied | human_escalation"
+        ),
+    )
+    scroll_stop_condition: str = Field(
+        default="",
+        description=(
+            "仅 completion_strategy=scroll_until_boundary 时填写。"
+            "一句话描述何时应停止滚动，例如："
+            "「当可见记录日期早于2026-05-03时停止」"
+            "「当可见内容不再包含1星评价时停止」"
+            "「滚动至列表物理底部时停止」"
+        ),
+    )
     failure_hints: list[str] = Field(default_factory=list)
     status: str = Field(default="pending", description="pending | running | done | failed")
     retry_count: int = 0
@@ -125,6 +225,8 @@ class PolicyTurn(BaseModel):
     action_decision: Optional[ActionDecision] = None
     executed: bool = False
     llm_calls: int = 0
+    read_added_content: bool = False
+    read_note_hash: Optional[str] = None
 
 
 class PolicyContext(BaseModel):
@@ -135,5 +237,7 @@ class PolicyContext(BaseModel):
     action_policy_name: str
     turns: list[PolicyTurn] = Field(default_factory=list)
     task_type: Optional[TaskType] = None
+    collection_scope: Optional[CollectionScope] = None
     content_notes: list[str] = Field(default_factory=list)
+    content_note_hashes: list[str] = Field(default_factory=list)
     output: Optional[str] = None

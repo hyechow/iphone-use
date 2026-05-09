@@ -8,8 +8,9 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
+from llm.structured import invoke_structured
 from policy_expr.config import resolve_llm_config
-from policy_expr.schemas import PolicyTurn
+from policy_expr.schemas import GoalValidationResult, PolicyTurn
 
 load_dotenv()
 
@@ -37,7 +38,8 @@ ANALYSIS_SYSTEM_PROMPT = """\
 - 直接呈现收集到的信息内容，不要描述 agent 的操作过程。
 - 合并重复内容，保留关键细节。
 - 如果信息不完整，如实说明，不要补充截图中没有的内容。
-- **数据校验**：如果用户目标包含特定条件（如时间范围、金额范围、特定类别），必须检查收集到的数据是否满足这些条件。如果数据与目标条件不匹配（如目标问「本周」但数据是「本月」），必须明确指出数据范围与目标不匹配，不要将错误范围的数据当作正确答案输出。
+- **数据校验**：如果用户目标包含特定条件（如范围、实体、类别、状态、排序、数量或数值条件），必须检查收集到的数据是否满足这些条件。如果数据与目标条件不匹配，必须明确指出不匹配点，不要将错误范围或错误条件下的数据当作正确答案输出。
+- 如果运行结论说明"未完成"或"数据校验不充分"，必须先明确说明当前数据不足，不能把不充分的数据包装成确定答案。
 - 不要提及"agent"、"截图"、"收集"等操作性词汇，直接给出答案。
 - 不要在结尾追加运行说明。
 """
@@ -67,6 +69,7 @@ def render_final_output(
             HumanMessage(
                 content=(
                     f"用户目标：{goal}\n\n"
+                    f"运行结论：{stop_reason}\n\n"
                     f"收集到的内容片段：\n{notes_text}"
                 )
             ),
@@ -102,6 +105,38 @@ def _build_output_context(
         "log_dir": str(log_dir),
         "turns": [turn.model_dump(mode="json") for turn in turns],
     }
+
+
+VALIDATION_PROMPT = """\
+判断以下收集到的数据片段是否充分回答了用户目标。
+
+用户目标：{goal}
+
+收集到的数据：
+{notes_text}
+
+要求：
+- 如果目标包含特定条件（如范围、实体、类别、状态、排序、数量或数值条件），检查数据是否满足这些条件
+- 如果数据范围或条件与目标不匹配，判定为不充分
+- 如果数据只是部分满足，也判定为不充分
+- 只有数据明确、完整地回答了用户目标时，才判定为充分
+
+输出 JSON：
+- sufficient: true/false
+- missing: 数据缺少什么（sufficient=false 时必填，sufficient=true 时留空）
+"""
+
+
+def validate_goal_completion(goal: str, content_notes: list[str]) -> GoalValidationResult:
+    """独立 LLM 校验：收集到的数据是否充分回答了用户目标。"""
+    cfg = resolve_llm_config("output")
+    llm = ChatOpenAI(model=cfg.model, api_key=cfg.api_key, base_url=cfg.base_url)
+    notes_text = "\n\n".join(f"[片段 {i+1}]\n{note}" for i, note in enumerate(content_notes))
+    messages = [
+        SystemMessage(content="你是数据充分性校验助手。"),
+        HumanMessage(content=VALIDATION_PROMPT.format(goal=goal, notes_text=notes_text)),
+    ]
+    return invoke_structured(llm, messages, GoalValidationResult)
 
 
 def _message_text(content: object) -> str:

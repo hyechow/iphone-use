@@ -1,11 +1,16 @@
 """CLI runner for policy experiments with two-layer architecture."""
 
 import argparse
+import hashlib
 import json
+import re
 import sys
 import time
+import traceback
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
+from typing import IO, Iterator
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -17,18 +22,15 @@ from llm.structured import get_llm_call_count
 from policy_expr.executor import ActionExecutor
 from policy_expr.supervisor import MilestoneSupervisorPolicy, SimpleSupervisorPolicy
 from policy_expr.supervisor.base import SupervisorPolicy
-from policy_expr.output import render_final_output
+from policy_expr.output import render_final_output, validate_goal_completion
 from policy_expr.perception import LivePerception, LivePhoneSession
-from policy_expr.reader import ContentReader
+from policy_expr.reader import ContentReader, annotate_content_note, build_reader_instruction
 from policy_expr.policies import StructuredOutputPolicy
 from policy_expr.policies.base import ActionPolicy
 from policy_expr.schemas import (
-    ActionDecision,
-    GoalValidationResult,
     Observation,
     PolicyContext,
     PolicyTurn,
-    SupervisorStep,
 )
 from policy_expr.visualize import print_decision
 
@@ -62,6 +64,55 @@ def create_run_dir(mode: str) -> Path:
     return path
 
 
+class _TeeStream:
+    """Write text to both the original stream and a log file."""
+
+    def __init__(self, original: IO[str], log_file: IO[str]) -> None:
+        self._original = original
+        self._log_file = log_file
+        self.encoding = getattr(original, "encoding", "utf-8")
+        self.errors = getattr(original, "errors", "replace")
+
+    def write(self, text: str) -> int:
+        written = self._original.write(text)
+        self._log_file.write(text)
+        return written
+
+    def flush(self) -> None:
+        self._original.flush()
+        self._log_file.flush()
+
+    def isatty(self) -> bool:
+        return self._original.isatty()
+
+    def fileno(self) -> int:
+        return self._original.fileno()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._original, name)
+
+
+@contextmanager
+def _tee_stdio(log_dir: Path) -> Iterator[None]:
+    """Mirror stdout/stderr to per-run text logs while preserving terminal output."""
+
+    stdout_path = log_dir / "stdout.log"
+    stderr_path = log_dir / "stderr.log"
+    with (
+        stdout_path.open("a", encoding="utf-8", buffering=1) as stdout_file,
+        stderr_path.open("a", encoding="utf-8", buffering=1) as stderr_file,
+        redirect_stdout(_TeeStream(sys.stdout, stdout_file)),
+        redirect_stderr(_TeeStream(sys.stderr, stderr_file)),
+    ):
+        print(f"Stdout  : {stdout_path}")
+        print(f"Stderr  : {stderr_path}")
+        try:
+            yield
+        except Exception:
+            traceback.print_exc()
+            raise SystemExit(1) from None
+
+
 def build_policy(name: str) -> ActionPolicy:
     try:
         return POLICIES[name]()
@@ -69,46 +120,6 @@ def build_policy(name: str) -> ActionPolicy:
         choices = ", ".join(sorted(POLICIES))
         raise ValueError(f"未知策略 {name!r}，可选：{choices}") from exc
 
-
-VALIDATION_PROMPT = """\
-判断以下收集到的数据片段是否充分回答了用户目标。
-
-用户目标：{goal}
-
-收集到的数据：
-{notes_text}
-
-要求：
-- 如果目标包含特定条件（如时间范围、金额范围、类别），检查数据是否满足这些条件
-- 如果数据范围与目标条件不匹配（如目标问"本周"但数据是"本月"），判定为不充分
-- 如果数据只是部分满足，也判定为不充分
-- 只有数据明确、完整地回答了用户目标时，才判定为充分
-
-输出 JSON：
-- sufficient: true/false
-- missing: 数据缺少什么（sufficient=false 时必填，sufficient=true 时留空）
-"""
-
-
-def validate_goal_completion(goal: str, content_notes: list[str]) -> GoalValidationResult:
-    """独立 LLM 校验：收集到的数据是否充分回答了用户目标。"""
-    from langchain_core.messages import HumanMessage, SystemMessage
-    from langchain_openai import ChatOpenAI
-
-    from llm.structured import invoke_structured
-    from policy_expr.config import resolve_llm_config
-
-    cfg = resolve_llm_config("output")
-    llm = ChatOpenAI(model=cfg.model, api_key=cfg.api_key, base_url=cfg.base_url)
-
-    notes_text = "\n\n".join(f"[片段 {i+1}]\n{note}" for i, note in enumerate(content_notes))
-    prompt = VALIDATION_PROMPT.format(goal=goal, notes_text=notes_text)
-
-    messages = [
-        SystemMessage(content="你是数据充分性校验助手。"),
-        HumanMessage(content=prompt),
-    ]
-    return invoke_structured(llm, messages, GoalValidationResult)
 
 
 def build_supervisor(name: str) -> SupervisorPolicy:
@@ -137,6 +148,24 @@ def _load_context(
         supervisor_policy_name=supervisor_name,
         action_policy_name=action_name,
     )
+
+
+def _ensure_note_hashes(context: PolicyContext) -> None:
+    if context.content_notes and not context.content_note_hashes:
+        context.content_note_hashes = [_note_hash(note) for note in context.content_notes]
+
+
+def _note_hash(note: str) -> str:
+    normalized = re.sub(r"\s+", "", note.strip().lower())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+
+def _supervisor_has_active_work(supervisor: SupervisorPolicy) -> bool:
+    current_id = getattr(supervisor, "_current_id", None)
+    if current_id is not None:
+        return True
+    return not isinstance(supervisor, MilestoneSupervisorPolicy)
 
 
 def emit_final_output(
@@ -202,14 +231,7 @@ def run_once(
         turn = PolicyTurn(
             index=1,
             observation_source=observation.source,
-            supervisor=SupervisorStep(
-                should_act=sv_step.should_act,
-                instruction=sv_step.instruction,
-                stop=sv_step.stop,
-                stop_reason=sv_step.stop_reason,
-                goal_completed=sv_step.goal_completed,
-                summary=sv_step.summary,
-            ),
+            supervisor=sv_step,
             action_decision=action_decision,
             executed=executed,
         )
@@ -229,14 +251,7 @@ def run_once(
             context.turns.append(PolicyTurn(
                 index=2,
                 observation_source="live",
-                supervisor=SupervisorStep(
-                    should_act=confirm.should_act,
-                    instruction=confirm.instruction,
-                    stop=confirm.stop,
-                    stop_reason=confirm.stop_reason,
-                    goal_completed=confirm.goal_completed,
-                    summary=confirm.summary,
-                ),
+                supervisor=confirm,
                 action_decision=None,
                 executed=False,
             ))
@@ -272,6 +287,7 @@ def run_agent_loop(
         supervisor.name,
         action_policy.name,
     )
+    _ensure_note_hashes(context)
     _save_context(context_path, context)
     print(f"Goal    : {context.goal}")
     print(f"Turns   : {len(context.turns)}")
@@ -281,6 +297,7 @@ def run_agent_loop(
     validation_retries = 0
     max_validation_retries = 2
     noop_count = 0
+    prev_milestone_id: str | None = None
 
     with LivePhoneSession() as phone:
         executor = ActionExecutor(phone)
@@ -308,14 +325,41 @@ def run_agent_loop(
             if hasattr(supervisor, "task_type") and context.task_type is None:
                 context.task_type = supervisor.task_type
                 print(f"任务类型: {context.task_type}")
+            if sv_step.collection_scope and sv_step.collection_scope != context.collection_scope:
+                context.collection_scope = sv_step.collection_scope
+                print(
+                    "采集范围: "
+                    + json.dumps(context.collection_scope.model_dump(exclude_none=True), ensure_ascii=False)
+                )
 
-            # Content reading for analysis tasks
-            if sv_step.read_instruction:
-                print(f"读取内容: {sv_step.read_instruction}")
-                note = reader.read(observation.png_bytes, sv_step.read_instruction)
+            read_added_content = False
+            read_note_hash = None
+
+            # Content reading is controlled by the current milestone strategy.
+            if sv_step.read_instruction and not sv_step.allow_read:
+                print(
+                    "跳过读取入库: 当前阶段不允许采集 "
+                    f"({sv_step.milestone_kind}/{sv_step.completion_strategy})"
+                )
+            elif sv_step.read_instruction:
+                reader_instruction = build_reader_instruction(original_goal, sv_step)
+                print(f"读取内容: {reader_instruction}")
+                note = reader.read(observation.png_bytes, reader_instruction)
                 if note and note != "无相关内容":
-                    context.content_notes.append(note)
-                    print(f"内容摘要: {note[:80]}...")
+                    note = annotate_content_note(
+                        note,
+                        turn_no=turn_no,
+                        sv_step=sv_step,
+                        collection_scope=context.collection_scope,
+                    )
+                    read_note_hash = _note_hash(note)
+                    if read_note_hash not in context.content_note_hashes:
+                        context.content_note_hashes.append(read_note_hash)
+                        context.content_notes.append(note)
+                        read_added_content = True
+                        print(f"内容摘要: {note[:80]}...")
+                    else:
+                        print("内容摘要: 与已采集内容重复，未入库")
 
             action_decision = None
             executed = False
@@ -338,25 +382,22 @@ def run_agent_loop(
             turn = PolicyTurn(
                 index=turn_no,
                 observation_source=observation.source,
-                supervisor=SupervisorStep(
-                    should_act=sv_step.should_act,
-                    instruction=sv_step.instruction,
-                    stop=sv_step.stop,
-                    stop_reason=sv_step.stop_reason,
-                    goal_completed=sv_step.goal_completed,
-                    summary=sv_step.summary,
-                ),
+                supervisor=sv_step,
                 action_decision=action_decision,
                 executed=executed,
                 llm_calls=get_llm_call_count() - llm_calls_before,
+                read_added_content=read_added_content,
+                read_note_hash=read_note_hash,
             )
             context.turns.append(turn)
             _save_context(context_path, context)
             _print_turn_stats(turn_no, turn_started_at, llm_calls_before)
 
             if sv_step.stop or sv_step.goal_completed:
-                # analysis 任务且有 content_notes → 二次校验
+                # analysis 任务达成且有 content_notes → 二次校验
                 if (
+                    sv_step.goal_completed
+                    and
                     context.task_type == "analysis"
                     and context.content_notes
                     and validation_retries < max_validation_retries
@@ -365,7 +406,32 @@ def run_agent_loop(
                     validation = validate_goal_completion(original_goal, context.content_notes)
                     if not validation.sufficient:
                         validation_retries += 1
-                        print(f"  [校验] 数据不充分 ({validation_retries}/{max_validation_retries}): {validation.missing}，继续执行")
+                        if not _supervisor_has_active_work(supervisor):
+                            reason = f"数据校验不充分：{validation.missing}"
+                            print(
+                                f"  [校验] 数据不充分 "
+                                f"({validation_retries}/{max_validation_retries}): "
+                                f"{validation.missing}，无可继续执行的子目标"
+                            )
+                            turn.supervisor.stop = True
+                            turn.supervisor.goal_completed = False
+                            _save_context(context_path, context)
+                            print(f"\n任务未完成：{reason}")
+                            context.output = emit_final_output(
+                                original_goal,
+                                supervisor.name,
+                                context.turns,
+                                log_dir,
+                                reason,
+                                content_notes=context.content_notes or None,
+                            )
+                            _save_context(context_path, context)
+                            return
+                        print(
+                            f"  [校验] 数据不充分 "
+                            f"({validation_retries}/{max_validation_retries}): "
+                            f"{validation.missing}，继续执行"
+                        )
                         # 注入校验反馈到 goal（只追加一次，不重复）
                         context.goal = (
                             f"{original_goal}\n\n"
@@ -378,8 +444,11 @@ def run_agent_loop(
                         _save_context(context_path, context)
                         continue
 
-                reason = sv_step.stop_reason or "目标已达成"
-                print(f"\n目标已达成：{reason}")
+                reason = sv_step.stop_reason or ("目标已达成" if sv_step.goal_completed else "agent-loop 停止")
+                if sv_step.goal_completed:
+                    print(f"\n目标已达成：{reason}")
+                else:
+                    print(f"\n任务未完成：{reason}")
                 context.output = emit_final_output(
                     original_goal,
                     supervisor.name,
@@ -403,8 +472,11 @@ def run_agent_loop(
                 _save_context(context_path, context)
                 return
 
+            if sv_step.milestone_id != prev_milestone_id:
+                noop_count = 0
+            prev_milestone_id = sv_step.milestone_id
+
             if not sv_step.should_act:
-                # milestone 完成 / 未执行动作 → 自动继续下一轮，不暂停
                 noop_count += 1
                 if noop_count >= 3:
                     print(f"\n连续 {noop_count} 轮无动作，agent-loop 停止")
@@ -493,24 +565,25 @@ def main() -> None:
     input_context_path = args.context
     log_dir = create_run_dir(mode)
     context_path = log_dir / "context.json"
-    print(f"Log Dir : {log_dir}")
-    print(f"Context : {input_context_path if input_context_path else None}")
+    with _tee_stdio(log_dir):
+        print(f"Log Dir : {log_dir}")
+        print(f"Context : {input_context_path if input_context_path else None}")
 
-    if mode == "single-step":
-        if input_context_path is not None:
-            raise ValueError("--context 目前只支持 agent-loop 模式")
-        run_once(args.prompt, action_policy, supervisor, log_dir, context_path)
-    elif mode == "agent-loop":
-        run_agent_loop(
-            args.prompt,
-            action_policy,
-            supervisor,
-            input_context_path,
-            log_dir,
-            context_path,
-            max_turns=args.max_turns,
-            auto_continue=args.auto_continue,
-        )
+        if mode == "single-step":
+            if input_context_path is not None:
+                raise ValueError("--context 目前只支持 agent-loop 模式")
+            run_once(args.prompt, action_policy, supervisor, log_dir, context_path)
+        elif mode == "agent-loop":
+            run_agent_loop(
+                args.prompt,
+                action_policy,
+                supervisor,
+                input_context_path,
+                log_dir,
+                context_path,
+                max_turns=args.max_turns,
+                auto_continue=args.auto_continue,
+            )
 
 
 if __name__ == "__main__":
