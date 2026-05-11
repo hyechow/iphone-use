@@ -3,6 +3,7 @@
 import base64
 import io
 import json
+import re
 from typing import Literal, Optional
 
 from PIL import Image
@@ -335,18 +336,28 @@ def _format_history(history: list[PolicyTurn]) -> str:
     lines = []
     for idx, turn in enumerate(recent):
         sv = turn.supervisor
-        result = recent[idx + 1].supervisor.summary if idx + 1 < len(recent) else "（结果尚未记录）"
+        next_sv = recent[idx + 1].supervisor if idx + 1 < len(recent) else None
+        result = next_sv.summary if next_sv else "（结果尚未记录）"
+        # Detect if this action led to stuck: next turn for same milestone indicates stuck/replan
+        failed = (
+            turn.executed
+            and next_sv
+            and next_sv.milestone_id == sv.milestone_id
+            and ("卡住" in (next_sv.summary or "") or "重试" in (next_sv.summary or ""))
+        )
+        prefix = "❌ " if failed else ""
         if turn.action_decision and turn.executed:
             action = turn.action_decision.action
+            outcome = f"导致错误: {result}" if failed else f"结果: {result}"
             lines.append(
-                f"{turn.index}. 指令=「{sv.instruction}」"
+                f"{turn.index}. {prefix}指令=「{sv.instruction}」"
                 f" → [{action.action_type}] {action.description}"
-                f" → 结果: {result}"
+                f" → {outcome}"
             )
         elif turn.action_decision and not turn.executed:
             action = turn.action_decision.action
             lines.append(
-                f"{turn.index}. 指令=「{sv.instruction}」 → [未执行] [{action.action_type}] {action.description}"
+                f"{turn.index}. {prefix}指令=「{sv.instruction}」 → [未执行] [{action.action_type}] {action.description}"
             )
         else:
             lines.append(f"{turn.index}. [跳过动作] {sv.summary} → 结果: {result}")
@@ -417,6 +428,26 @@ class MilestoneSupervisorPolicy:
                 milestone, check, observation, history,
                 extra="你刚才输出了多个步骤，请只返回当前屏幕上马上要做的一个操作。",
             )
+        # Post-check: reject instructions that repeat previously tried ones
+        if self._is_repeated_instruction(plan.instruction, milestone.id, history):
+            print("  [Planner] 指令重复已失败操作，重试...")
+            plan = self._invoke_planner(
+                milestone, check, observation, history,
+                extra=(
+                    "你刚才的指令与之前失败的操作相同。"
+                    "请仔细查看截图，找一个不同的 UI 元素或操作路径。"
+                ),
+            )
+            # If retry still repeats, escalate to replanner
+            if self._is_repeated_instruction(plan.instruction, milestone.id, history):
+                print("  [Planner] 重试仍重复，升级为 stuck 处理")
+                stuck_check = _SingleCheckResult(
+                    status="stuck",
+                    reason=f"planner 无法找到与之前不同的操作路径，已尝试指令均导致错误",
+                    stuck_reason="planner 陷入重复，无法生成新操作",
+                    summary=check.summary,
+                )
+                return self._handle_stuck(milestone, stuck_check, check.read_instruction, observation, history)
         print(f"  [Planner] {plan.instruction}")
         milestone.status = "running"
         return SupervisorStep(
@@ -587,6 +618,9 @@ class MilestoneSupervisorPolicy:
         self._recent_screenshots.clear()
         milestone.retry_count += 1
 
+        # Propagate failure to global_constraints so subsequent planner calls avoid it
+        self._record_failure_constraint(milestone, check, history)
+
         if milestone.retry_count >= MAX_RETRIES:
             fallback = self._try_filter_fallback(milestone, can_degrade=True, read_inst=read_inst)
             if fallback:
@@ -672,6 +706,15 @@ class MilestoneSupervisorPolicy:
         )
         if dependent is None:
             return None
+        # When degrading filter → collection, update stop_condition to reflect
+        # the filter's original intent (e.g. date range) so the loop knows when
+        # content has left the target scope.
+        if _is_loop(dependent):
+            filter_intent = milestone.success_condition
+            dependent.scroll_stop_condition = (
+                f"当可见内容不再满足筛选条件「{filter_intent}」时停止滚动"
+            )
+            dependent.observable_boundary = False
         milestone.status = "done"
         self._current_id = dependent.id
         self._recent_screenshots.clear()
@@ -687,6 +730,32 @@ class MilestoneSupervisorPolicy:
         )
 
     # ── LLM invocations ───────────────────────────────────────────────
+
+    def _record_failure_constraint(
+        self,
+        milestone: Milestone,
+        check: _SingleCheckResult,
+        history: list[PolicyTurn],
+    ) -> None:
+        """Write a semantic failure constraint to global_constraints."""
+        reason = check.stuck_reason or check.reason
+        # When planner escalates due to repetition, skip — the original
+        # stuck event already recorded the right constraint.
+        if "planner 陷入重复" in reason:
+            return
+        last_action = next(
+            (t for t in reversed(history)
+             if t.supervisor and t.supervisor.milestone_id == milestone.id
+             and t.supervisor.instruction and t.executed),
+            None,
+        )
+        if not last_action:
+            return
+        instruction = last_action.supervisor.instruction
+        constraint = f"指令「{instruction}」导致错误：{reason}，禁止重复此指令"
+        if constraint not in self._global_constraints:
+            self._global_constraints.append(constraint)
+            print(f"  [Constraint] {constraint}")
 
     def _single_check(
         self,
@@ -1143,6 +1212,29 @@ class MilestoneSupervisorPolicy:
         text = instruction.strip()
         markers = ("操作序列", "步骤", "\n1.", "\n2.", "1.", "2.", "；2", ";2")
         return any(m in text for m in markers)
+
+    def _is_repeated_instruction(
+        self, instruction: str, milestone_id: str, history: list[PolicyTurn],
+    ) -> bool:
+        """Check if the instruction repeats a previously tried one for the same milestone."""
+        from difflib import SequenceMatcher
+        tried = {
+            t.supervisor.instruction
+            for t in history
+            if t.supervisor
+            and t.supervisor.instruction
+            and t.supervisor.milestone_id == milestone_id
+        }
+        if not tried:
+            return False
+        n_new = re.sub(r"[，。、；：""''《》\s（）\(\)]", "", instruction.strip())
+        for old in tried:
+            n_old = re.sub(r"[，。、；：""''《》\s（）\(\)]", "", old.strip())
+            if n_new and n_old:
+                ratio = SequenceMatcher(None, n_new, n_old).ratio()
+                if ratio >= 0.6:
+                    return True
+        return False
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
