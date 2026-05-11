@@ -285,12 +285,16 @@ REPLAN_PROMPT = """\
 - 全局约束：{constraints}
 - 预期失败提示：{failure_hints}
 
+## 已完成的子目标（不要退回这些状态）
+{completed_milestones}
+
 ## 历史操作记录
 {history_text}
 
 ## 分析要求
 1. 观察截图，理解当前所有可见 UI 元素
 2. 检查历史操作是否存在 A→B→A→B 交替循环，如果存在必须跳出
+3. 禁止退回到已完成子目标的状态（如已完成「回到主屏幕」就不要再按 Home 键）
 3. 分析之前失败的根本原因
 4. 找到一条不同的路径
 
@@ -411,7 +415,10 @@ class MilestoneSupervisorPolicy:
         if check.status == "done":
             return self._advance(milestone, observation, history)
         if check.status == "stuck":
-            return self._handle_stuck(milestone, check, check.read_instruction, observation, history)
+            # Page changed (sim_stuck=None) means navigation is progressing —
+            # not a true retry, just not at the target yet.
+            page_changed = sim_stuck is None
+            return self._handle_stuck(milestone, check, check.read_instruction, observation, history, page_changed=page_changed)
         return self._plan_single(milestone, check, observation, history)
 
     def _plan_single(
@@ -614,9 +621,23 @@ class MilestoneSupervisorPolicy:
         read_inst: Optional[str],
         observation: Observation,
         history: list[PolicyTurn],
+        page_changed: bool = True,
     ) -> SupervisorStep:
         self._recent_screenshots.clear()
-        milestone.retry_count += 1
+        # Decide whether to count this as a retry:
+        # - Not executed (action policy refused): skip
+        # - Page changed: navigation progress, not a retry — skip
+        # - Same page: genuine stuck, count as retry
+        skip_retry = False
+        if history and history[-1].supervisor and history[-1].supervisor.milestone_id == milestone.id:
+            if history[-1].supervisor.instruction and not history[-1].executed:
+                print(f"  [Replan] 上一轮指令未执行，不计入重试次数")
+                skip_retry = True
+            elif page_changed:
+                print(f"  [Replan] 页面已变化（导航推进中），不计入重试次数")
+                skip_retry = True
+        if not skip_retry:
+            milestone.retry_count += 1
 
         # Propagate failure to global_constraints so subsequent planner calls avoid it
         self._record_failure_constraint(milestone, check, history)
@@ -864,6 +885,13 @@ class MilestoneSupervisorPolicy:
             and t.supervisor.milestone_id == milestone.id
         })
         tried_text = "\n".join(f"  - 「{i}」" for i in tried) if tried else "  （无）"
+        # Add completed milestone context to prevent regression
+        done_lines = [
+            f"  - [{m.id}] {m.name}（已完成，不要退回到该状态）"
+            for m in self._milestones.values()
+            if m.status == "done" and m.id != milestone.id
+        ]
+        done_context = "\n".join(done_lines) if done_lines else "  （无）"
         prompt = REPLAN_PROMPT.format(
             milestone_name=milestone.name,
             milestone_desc=milestone.description,
@@ -873,6 +901,7 @@ class MilestoneSupervisorPolicy:
             retry_count=milestone.retry_count,
             constraints=json.dumps(self._global_constraints, ensure_ascii=False),
             failure_hints=json.dumps(milestone.failure_hints, ensure_ascii=False),
+            completed_milestones=done_context,
             history_text=_format_history(history),
             tried_instructions=tried_text,
         )
@@ -1218,13 +1247,21 @@ class MilestoneSupervisorPolicy:
     ) -> bool:
         """Check if the instruction repeats a previously tried one for the same milestone."""
         from difflib import SequenceMatcher
-        tried = {
-            t.supervisor.instruction
-            for t in history
-            if t.supervisor
-            and t.supervisor.instruction
-            and t.supervisor.milestone_id == milestone_id
-        }
+        # Only check against instructions that LED TO STUCK, not all executed ones.
+        # A normally executed instruction can be retried (e.g. same tap on same screen).
+        tried = set()
+        for idx, t in enumerate(history):
+            sv = t.supervisor
+            if not sv or not sv.instruction or sv.milestone_id != milestone_id:
+                continue
+            # Check if the NEXT turn detected stuck for the same milestone
+            next_sv = history[idx + 1].supervisor if idx + 1 < len(history) else None
+            if (
+                next_sv
+                and next_sv.milestone_id == milestone_id
+                and ("卡住" in (next_sv.summary or "") or "重试" in (next_sv.summary or ""))
+            ):
+                tried.add(sv.instruction)
         if not tried:
             return False
         n_new = re.sub(r"[，。、；：""''《》\s（）\(\)]", "", instruction.strip())

@@ -93,6 +93,10 @@ class ActionDecision(BaseModel):
     """Action policy output: the next action to execute."""
 
     action: Action = Field(description="当前应该执行的操作")
+    not_found_reason: Optional[str] = Field(
+        default=None,
+        description="当截图中找不到指令要求的目标元素时填写原因（如「当前页面无通讯录标签」）；找到目标时留空",
+    )
 
     @model_validator(mode="before")
     @classmethod

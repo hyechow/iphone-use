@@ -369,7 +369,12 @@ def run_agent_loop(
                         observation.png_bytes,
                         log_dir / f"structured_output_result_turn_{turn_no}.png",
                     )
-                executed = executor.execute(action_decision, app_name=sv_step.app_name or "")
+                # Action policy refused: target element not found on screen
+                if action_decision.not_found_reason:
+                    print(f"  [NotFound] {action_decision.not_found_reason}")
+                    executed = False
+                else:
+                    executed = executor.execute(action_decision, app_name=sv_step.app_name or "")
 
             turn = PolicyTurn(
                 index=turn_no,
@@ -404,6 +409,23 @@ def run_agent_loop(
                 return
 
             if not executed and sv_step.should_act:
+                if action_decision and action_decision.not_found_reason:
+                    # Action policy refused — treat as noop, let supervisor replan next turn
+                    noop_count += 1
+                    if noop_count >= 3:
+                        print(f"\n连续 {noop_count} 轮无动作，agent-loop 停止")
+                        context.output = emit_final_output(
+                            original_goal,
+                            supervisor.name,
+                            context.turns,
+                            log_dir,
+                            f"连续 {noop_count} 轮无动作",
+                            content_notes=context.content_notes or None,
+                        )
+                        _save_context(context_path, context)
+                        return
+                    continue
+                # Genuine execution failure — stop
                 context.output = emit_final_output(
                     context.goal,
                     supervisor.name,
