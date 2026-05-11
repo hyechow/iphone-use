@@ -22,6 +22,7 @@ MAX_RETRIES = 3
 STUCK_SCREEN_WINDOW = 3
 STUCK_SCREEN_SIMILARITY = 0.95
 STUCK_SCREEN_FROZEN = 0.99
+MAX_SCROLL_PER_MILESTONE = 3
 STUCK_REPEAT_WINDOW = 3
 STUCK_REPEAT_WORD_OVERLAP = 0.85
 
@@ -37,6 +38,7 @@ class _SingleCheckResult(BaseModel):
     issues: list[str] = Field(default_factory=list)
     visible_evidence: list[str] = Field(default_factory=list, description="截图中支持 done 的可见证据")
     missing_evidence: list[str] = Field(default_factory=list, description="缺失的验收证据")
+    page_identity: str = Field(default="", description="当前页面的身份识别（如：订单列表、发票管理、个人中心）")
     summary: str = Field(description="当前屏幕状态一句话描述")
     read_instruction: Optional[str] = Field(
         default=None,
@@ -70,7 +72,12 @@ class _ReplanResult(BaseModel):
 
 class _StopConditionPatch(BaseModel):
     scroll_stop_condition: str = Field(
-        description="一句话描述何时应停止滚动，例如：「当可见记录日期早于2026-05-03时停止」"
+        description="一句话描述何时应停止滚动。从依赖链的约束维度推导：有日期范围用日期边界，"
+                    "有关键词用关键词消失条件，没有任何约束的全量采集用'滚动至列表物理底部时停止'"
+    )
+    observable_boundary: bool = Field(
+        description="该停止条件是否在屏幕上可直接观察。日期标记、'没有更多了'提示为 true；"
+                    "关键词相关性、内容充分性判断为 false"
     )
 
 
@@ -124,11 +131,20 @@ DECOMPOSE_PROMPT = """\
 8. failure_hints 列出该子目标可能失败的原因
 9. 「打开应用」类子目标验收条件应为「成功进入该应用（任意页面均可）」
 10. 进入应用内某个 tab/page 的验收条件必须包含可见页面标题、选中状态或该页面独有的稳定内容证据
+11. task_type=analysis 时，不生成 kind=verification 的子目标。数据完整性由采集阶段保证，不需要单独验证子目标
 """
 
 SINGLE_CHECKER_PROMPT = """\
 你是 iPhone 自动化任务的验收员。根据当前屏幕截图和子目标验收条件，判断执行进展。
 
+请按以下步骤分析（按顺序推理）：
+
+**第一步：页面识别**
+先识别当前页面是什么。观察截图中的标题、tab标签、页面布局，确定页面身份（如：订单列表、发票管理、个人中心、账单页面、聊天列表等）。
+将结果填入 page_identity 字段。
+
+**第二步：验收判断**
+基于第一步的页面识别结果，判断验收条件是否满足。如果页面身份与验收条件不匹配（如验收要求"订单列表"但实际在"发票管理"），必须判定 stuck。
 ## 当前子目标
 - 名称：{milestone_name}
 - 描述：{milestone_desc}
@@ -288,17 +304,25 @@ REPLAN_PROMPT = """\
 """
 
 STOP_CONDITION_PATCH_PROMPT = """\
-你是 iPhone 自动化任务的规划助手。一个需要滚动采集的子目标需要生成停止条件。
+你是 iPhone 自动化任务的规划助手。你需要从依赖链推导滚动采集子目标的停止条件。
 
-根据用户目标、本子目标的验收条件、以及前置子目标的验收条件，推导出停止滚动的边界。
-停止条件必须从验收条件中的筛选维度推导——如果前置验收条件限定了时间范围，停止条件就用时间边界；如果限定了关键词，就用关键词边界。
+推导规则：
+1. 看前置子目标的验收条件，找出约束维度（时间范围？金额阈值？关键词？）
+2. 如果前置验收条件限定了时间范围，停止条件就用对应的日期边界
+3. 如果前置验收条件限定了金额/数量，停止条件就用数值边界
+4. 如果前置验收条件限定了关键词/类别，停止条件就用关键词消失条件
+5. 如果没有任何筛选约束，是全量采集，使用"滚动至列表物理底部时停止"
 
-规则：
+可观察性判断：
+- 日期边界（列表按日期排序，看到某个日期就停）→ observable_boundary=true
+- 列表物理结束标识（"没有更多了"、分组标题变化）→ observable_boundary=true
+- 关键词/相关性消失（需要判断"是否还有相关内容"）→ observable_boundary=false
+- 瀑布流/无限加载（永远不会有"到底"信号）→ observable_boundary=false
+
+要求：
 - 输出一句话描述何时停止滚动
-- 必须从验收条件的约束维度推导，不能泛化为"滚动至列表物理底部"
-- 如果验收条件限定时间范围，停止条件必须包含对应日期边界
-- 如果验收条件限定关键词/类别，停止条件必须包含对应的消失条件
-- 只有没有任何筛选约束的全量采集，才使用"滚动至列表物理底部时停止"
+- 必须从约束维度推导，不能默认使用"物理底部"
+- 如果已给出当前停止条件且与约束维度一致，保持不变
 """
 
 # ── History formatter ─────────────────────────────────────────────────
@@ -344,6 +368,7 @@ class MilestoneSupervisorPolicy:
         self._current_id: Optional[str] = None
         self._initialized = False
         self._recent_screenshots: list[bytes] = []
+        self._scroll_counts: dict[str, int] = {}
         self.task_type: Literal["action", "analysis"] = "action"
 
     def step(self, observation: Observation, goal: str, history: list[PolicyTurn]) -> SupervisorStep:
@@ -411,6 +436,18 @@ class MilestoneSupervisorPolicy:
         observation: Observation,
         history: list[PolicyTurn],
     ) -> SupervisorStep:
+        # Track scroll count
+        self._scroll_counts[milestone.id] = self._scroll_counts.get(milestone.id, 0) + 1
+        scroll_count = self._scroll_counts[milestone.id]
+
+        # Termination: scroll budget (safety net, always applies)
+        budget = MAX_SCROLL_PER_MILESTONE  # strict for non-observable boundaries
+        if milestone.observable_boundary:
+            budget = 10  # generous for observable boundaries (stop_condition should trigger first)
+        if scroll_count > budget:
+            print(f"  [Loop] 滚动预算耗尽（{scroll_count}/{budget}，observable={milestone.observable_boundary}）→ 结束收集")
+            return self._advance(milestone, observation, history)
+
         # Termination: sim_stuck (screen stopped changing)
         sim_stuck = self._check_screen_similarity(observation)
         last_read_added = bool(
@@ -432,7 +469,11 @@ class MilestoneSupervisorPolicy:
         print(f"  [LoopFrame] boundary={frame.boundary_reached}, should_stop={frame.should_stop}")
         if frame.should_stop:
             print(f"  [Loop] 停止条件触发：{frame.stop_reason}")
-        read_inst = frame.read_instruction or _default_read_instruction(milestone)
+        # Action tasks: loop is for finding a target, no need to read content
+        if self.task_type == "action":
+            read_inst = None
+        else:
+            read_inst = frame.read_instruction or _default_read_instruction(milestone)
 
         # Termination: stop condition triggered
         if frame.should_stop:
@@ -463,6 +504,7 @@ class MilestoneSupervisorPolicy:
 
         # Continue: reuse last scroll or plan first scroll
         milestone.status = "running"
+        loop_summary_prefix = "继续滚动查找目标" if self.task_type == "action" else "继续滚动收集内容"
         if _last_scroll_was_for(history, milestone.id):
             return SupervisorStep(
                 should_act=True,
@@ -470,7 +512,7 @@ class MilestoneSupervisorPolicy:
                 preformed_action=history[-1].action_decision,
                 stop=False,
                 goal_completed=False,
-                summary=f"继续滚动收集内容。{frame.summary}",
+                summary=f"{loop_summary_prefix}。{frame.summary}",
                 read_instruction=read_inst,
                 allow_read=bool(read_inst),
                 milestone_id=milestone.id,
@@ -961,6 +1003,22 @@ class MilestoneSupervisorPolicy:
         """Apply structural fixes for issues that survive retry. Last resort."""
         fixes = []
 
+        # 0. Remove verification milestones for analysis tasks
+        if self.task_type == "analysis":
+            verification_ids = [
+                mid for mid, m in self._milestones.items()
+                if m.kind == "verification"
+            ]
+            for vid in verification_ids:
+                removed = self._milestones.pop(vid)
+                self._order.remove(vid)
+                # Rewire: milestones that depended on verification now depend on its predecessor
+                for m in self._milestones.values():
+                    if vid in m.depends_on:
+                        m.depends_on.remove(vid)
+                        m.depends_on.extend(removed.depends_on)
+                fixes.append(f"子目标「{removed.name}」（verification）已移除")
+
         # 1. Remove invalid depends_on
         all_ids = set(self._milestones.keys())
         for m in self._milestones.values():
@@ -1005,12 +1063,12 @@ class MilestoneSupervisorPolicy:
                 m.completion_strategy = "scroll_until_boundary"
                 fixes.append(f"子目标「{m.name}」策略修正为 scroll_until_boundary")
 
-        # 5. Fill missing scroll_stop_condition via LLM
-        needs_stop_condition = [
+        # 5. Derive stop_condition from dependency chain for all scroll milestones
+        scroll_milestones = [
             m for m in self._milestones.values()
-            if m.completion_strategy == "scroll_until_boundary" and not m.scroll_stop_condition
+            if m.completion_strategy == "scroll_until_boundary"
         ]
-        for m in needs_stop_condition:
+        for m in scroll_milestones:
             dep_context = ""
             if m.depends_on:
                 dep_lines = []
@@ -1020,6 +1078,7 @@ class MilestoneSupervisorPolicy:
                         dep_lines.append(f"  - 前置子目标「{dep.name}」验收条件：{dep.success_condition}")
                 if dep_lines:
                     dep_context = "\n".join(dep_lines)
+            existing = f"\n当前停止条件：{m.scroll_stop_condition}" if m.scroll_stop_condition else "\n当前停止条件：（空）"
             patch = invoke_structured(
                 llm,
                 [
@@ -1031,12 +1090,17 @@ class MilestoneSupervisorPolicy:
                         f"本子目标验收条件：{m.success_condition}\n"
                         f"{dep_context}\n"
                         f"全局约束：{json.dumps(self._global_constraints, ensure_ascii=False)}"
+                        f"{existing}"
                     )),
                 ],
                 _StopConditionPatch,
             )
-            m.scroll_stop_condition = patch.scroll_stop_condition
-            fixes.append(f"子目标「{m.name}」补全停止条件 → {m.scroll_stop_condition}")
+            if patch.scroll_stop_condition != m.scroll_stop_condition:
+                fixes.append(
+                    f"子目标「{m.name}」停止条件修正：{m.scroll_stop_condition or '（空）'} → {patch.scroll_stop_condition}"
+                )
+                m.scroll_stop_condition = patch.scroll_stop_condition
+                m.observable_boundary = patch.observable_boundary
 
         # 6. Fix task_type
         analysis_keywords = ("多少", "什么", "有没有", "查看", "看看", "统计", "查一下", "帮我找", "列出", "汇总", "比较")

@@ -22,7 +22,7 @@ from llm.structured import get_llm_call_count
 from policy_expr.executor import ActionExecutor
 from policy_expr.supervisor import MilestoneSupervisorPolicy, SimpleSupervisorPolicy
 from policy_expr.supervisor.base import SupervisorPolicy
-from policy_expr.output import render_final_output, validate_goal_completion
+from policy_expr.output import render_final_output
 from policy_expr.perception import LivePerception, LivePhoneSession
 from policy_expr.reader import ContentReader, annotate_content_note, build_reader_instruction
 from policy_expr.policies import StructuredOutputPolicy
@@ -161,13 +161,6 @@ def _note_hash(note: str) -> str:
 
 
 
-def _supervisor_has_active_work(supervisor: SupervisorPolicy) -> bool:
-    current_id = getattr(supervisor, "_current_id", None)
-    if current_id is not None:
-        return True
-    return not isinstance(supervisor, MilestoneSupervisorPolicy)
-
-
 def emit_final_output(
     goal: str,
     policy_name: str,
@@ -295,8 +288,6 @@ def run_agent_loop(
 
     reader = ContentReader()
     original_goal = context.goal
-    validation_retries = 0
-    max_validation_retries = 2
     noop_count = 0
     prev_milestone_id: str | None = None
 
@@ -395,60 +386,6 @@ def run_agent_loop(
             _print_turn_stats(turn_no, turn_started_at, llm_calls_before)
 
             if sv_step.stop or sv_step.goal_completed:
-                # analysis 任务达成且有 content_notes → 二次校验
-                if (
-                    sv_step.goal_completed
-                    and
-                    context.task_type == "analysis"
-                    and context.content_notes
-                    and validation_retries < max_validation_retries
-                ):
-                    print("  [校验] 数据充分性检查...")
-                    validation = validate_goal_completion(
-                        original_goal, context.content_notes,
-                        collection_context=sv_step.collection_summary,
-                    )
-                    if not validation.sufficient:
-                        validation_retries += 1
-                        if not _supervisor_has_active_work(supervisor):
-                            reason = f"数据校验不充分：{validation.missing}"
-                            print(
-                                f"  [校验] 数据不充分 "
-                                f"({validation_retries}/{max_validation_retries}): "
-                                f"{validation.missing}，无可继续执行的子目标"
-                            )
-                            turn.supervisor.stop = True
-                            turn.supervisor.goal_completed = False
-                            _save_context(context_path, context)
-                            print(f"\n任务未完成：{reason}")
-                            context.output = emit_final_output(
-                                original_goal,
-                                supervisor.name,
-                                context.turns,
-                                log_dir,
-                                reason,
-                                content_notes=context.content_notes or None,
-                                collection_context=sv_step.collection_summary,
-                            )
-                            _save_context(context_path, context)
-                            return
-                        print(
-                            f"  [校验] 数据不充分 "
-                            f"({validation_retries}/{max_validation_retries}): "
-                            f"{validation.missing}，继续执行"
-                        )
-                        # 注入校验反馈到 goal（只追加一次，不重复）
-                        context.goal = (
-                            f"{original_goal}\n\n"
-                            f"[校验反馈：之前收集的数据不完整——{validation.missing}，"
-                            f"请换一种方式获取所需数据。]"
-                        )
-                        # 回退本轮 turn 的完成标记
-                        turn.supervisor.stop = False
-                        turn.supervisor.goal_completed = False
-                        _save_context(context_path, context)
-                        continue
-
                 reason = sv_step.stop_reason or ("目标已达成" if sv_step.goal_completed else "agent-loop 停止")
                 if sv_step.goal_completed:
                     print(f"\n目标已达成：{reason}")

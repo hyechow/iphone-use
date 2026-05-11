@@ -10,7 +10,7 @@ from langchain_openai import ChatOpenAI
 
 from llm.structured import invoke_structured
 from policy_expr.config import resolve_llm_config
-from policy_expr.schemas import GoalValidationResult, PolicyTurn
+from policy_expr.schemas import PolicyTurn
 
 load_dotenv()
 
@@ -108,40 +108,6 @@ def _build_output_context(
         "log_dir": str(log_dir),
         "turns": [turn.model_dump(mode="json") for turn in turns],
     }
-
-
-VALIDATION_PROMPT = """\
-判断以下收集到的数据片段是否充分回答了用户目标。
-
-用户目标：{goal}
-
-收集到的数据：
-{notes_text}
-
-要求：
-- 如果目标包含特定条件（如范围、实体、类别、状态、排序、数量或数值条件），检查数据是否满足这些条件
-- 如果数据范围或条件与目标不匹配，判定为不充分
-- 如果数据只是部分满足，也判定为不充分
-- 只有数据明确、完整地回答了用户目标时，才判定为充分
-
-输出 JSON：
-- sufficient: true/false
-- missing: 数据缺少什么（sufficient=false 时必填，sufficient=true 时留空）
-"""
-
-
-def validate_goal_completion(goal: str, content_notes: list[str], collection_context: str | None = None) -> GoalValidationResult:
-    """独立 LLM 校验：收集到的数据是否充分回答了用户目标。"""
-    cfg = resolve_llm_config("output")
-    llm = ChatOpenAI(model=cfg.model, api_key=cfg.api_key, base_url=cfg.base_url)
-    notes_text = "\n\n".join(f"[片段 {i+1}]\n{note}" for i, note in enumerate(content_notes))
-    if collection_context:
-        notes_text = f"[采集上下文] {collection_context}\n\n以下为逐帧提取的内容片段：\n\n{notes_text}"
-    messages = [
-        SystemMessage(content="你是数据充分性校验助手。"),
-        HumanMessage(content=VALIDATION_PROMPT.format(goal=goal, notes_text=notes_text)),
-    ]
-    return invoke_structured(llm, messages, GoalValidationResult)
 
 
 def _message_text(content: object) -> str:

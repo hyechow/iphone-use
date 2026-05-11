@@ -214,6 +214,10 @@ class Milestone(BaseModel):
             "「滚动至列表物理底部时停止」"
         ),
     )
+    observable_boundary: bool = Field(
+        default=True,
+        description="停止条件是否在屏幕上可直接观察。日期标记、列表结束标识为 true；关键词相关性为 false",
+    )
     failure_hints: list[str] = Field(default_factory=list)
     status: str = Field(default="pending", description="pending | running | done | failed")
     retry_count: int = 0

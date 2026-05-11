@@ -13,7 +13,7 @@ llm:
       model: qwen3.5-35b-a3b
   reader:
     provider: dashscope
-    model: qwen3.5-flash
+    model: qwen3.5-35b-a3b
   output:
     provider: dashscope
     model: qwen3.5-flash
