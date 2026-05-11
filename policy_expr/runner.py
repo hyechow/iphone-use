@@ -522,10 +522,23 @@ def main() -> None:
         action="store_true",
         help="agent-loop 动作执行后自动进入下一轮；默认手动确认",
     )
+    parser.add_argument(
+        "--knowledge",
+        type=Path,
+        help="应用知识文档路径（markdown），注入到任务分解 prompt 中",
+    )
     args = parser.parse_args()
 
     action_policy = build_policy(args.policy)
     supervisor = build_supervisor(args.supervisor)
+
+    # Load app knowledge if provided
+    if args.knowledge and args.knowledge.exists():
+        knowledge_text = args.knowledge.read_text(encoding="utf-8").strip()
+        if hasattr(supervisor, "set_app_knowledge"):
+            supervisor.set_app_knowledge(knowledge_text)
+            print(f"Knowledge: {args.knowledge} ({len(knowledge_text)} chars)")
+
     mode = args.mode
     input_context_path = args.context
     log_dir = create_run_dir(mode)

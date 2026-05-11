@@ -385,6 +385,10 @@ class MilestoneSupervisorPolicy:
         self._recent_screenshots: list[bytes] = []
         self._scroll_counts: dict[str, int] = {}
         self.task_type: Literal["action", "analysis"] = "action"
+        self._app_knowledge: Optional[str] = None
+
+    def set_app_knowledge(self, text: str) -> None:
+        self._app_knowledge = text
 
     def step(self, observation: Observation, goal: str, history: list[PolicyTurn]) -> SupervisorStep:
         if not self._initialized:
@@ -797,6 +801,8 @@ class MilestoneSupervisorPolicy:
         )
         if extra:
             prompt += f"\n\n## 输出修正要求\n{extra}"
+        if self._app_knowledge:
+            prompt += f"\n\n## 应用导航知识\n{self._app_knowledge}"
         result = invoke_structured(self._llm(), self._msgs(prompt, observation), _SingleCheckResult)
 
         # Guard: done without evidence
@@ -1013,6 +1019,10 @@ class MilestoneSupervisorPolicy:
         # Final structural fixes for anything the retry couldn't resolve
         self._patch_decomposition(llm, goal)
 
+        # Re-evaluate _current_id after patching may have removed milestones
+        if self._current_id not in self._milestones:
+            self._current_id = self._next_milestone()
+
         print(f"任务分解为 {len(self._milestones)} 个子目标：")
         for mid in self._order:
             m = self._milestones[mid]
@@ -1029,6 +1039,8 @@ class MilestoneSupervisorPolicy:
     ) -> None:
         msgs = self._msgs(DECOMPOSE_PROMPT, observation)
         user_parts: list[dict] = [{"type": "text", "text": f"用户任务：{goal}"}]
+        if self._app_knowledge:
+            user_parts.append({"type": "text", "text": f"\n## 应用导航知识\n{self._app_knowledge}"})
         if feedback:
             fb = "\n".join(f"  - {i}" for i in feedback)
             user_parts.append({"type": "text", "text": f"\n上一轮分解存在以下问题，请修正：\n{fb}"})

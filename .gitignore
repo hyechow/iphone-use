@@ -8,3 +8,4 @@ logs/
 debug.log
 bin/
 tmp_scripts/
+knowledge/*.png
