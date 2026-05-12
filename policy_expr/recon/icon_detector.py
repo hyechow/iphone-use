@@ -59,21 +59,21 @@ class IconDetector:
         png_bytes: bytes,
         img_w: int,
         img_h: int,
-        nav_bar_y: int = 200,
+        nav_bar_y: int = 180,
         max_width_ratio: float = 0.8,
         overlap_thresh: float = 0.8,
         min_gray_std: float = 5.0,
     ) -> list[IconBbox]:
         """Detect icons and apply three-layer filtering.
 
-        1. Remove navigation bar noise (cy < nav_bar_y)
+        1. Remove navigation/status-bar noise (cy < nav_bar_y)
         2. Remove wide boxes (width > max_width_ratio * img_w)
         3. Remove visually blank boxes (low grayscale standard deviation)
         4. Merge small boxes whose area >= overlap_thresh is inside a larger box
         """
         boxes = self.detect(png_bytes)
 
-        # Filter 1: navigation bar
+        # Filter 1: navigation/status bar
         boxes = [b for b in boxes if b.cy >= nav_bar_y]
 
         # Filter 2: overly wide

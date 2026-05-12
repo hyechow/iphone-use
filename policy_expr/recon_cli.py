@@ -19,6 +19,7 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from dotenv import load_dotenv
+from PIL import Image
 
 load_dotenv()
 
@@ -27,6 +28,7 @@ from policy_expr.recon.bfs import probe_elements
 
 ROOT = Path(__file__).parent.parent
 LOG_ROOT = ROOT / "logs" / "recon"
+OFFLINE_EXPECTED_SIZE = (636, 1402)
 
 
 def run_online(*, debug: bool = False) -> None:
@@ -80,6 +82,14 @@ def run_offline(paths: list[Path]) -> None:
     out_dir = LOG_ROOT / "offline"
     for img_path in images:
         png_bytes = img_path.read_bytes()
+        with Image.open(img_path) as img:
+            if img.size != OFFLINE_EXPECTED_SIZE:
+                print(
+                    f"离线测试截图尺寸不匹配: {img_path} "
+                    f"实际 {img.width}x{img.height}，"
+                    f"期望 {OFFLINE_EXPECTED_SIZE[0]}x{OFFLINE_EXPECTED_SIZE[1]}"
+                )
+                raise SystemExit(1)
         initial_path = out_dir / f"{img_path.stem}_initial.png"
         initial_path.parent.mkdir(parents=True, exist_ok=True)
         initial_path.write_bytes(png_bytes)
