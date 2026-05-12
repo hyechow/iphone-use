@@ -97,6 +97,84 @@ class ParsedPage(BaseModel):
     )
 
 
+class InteractiveArea(BaseModel):
+    label: str = Field(description="简短标签，2-6 字")
+    target_page: str = Field(description="目标页面名称")
+    description: str = Field(description="简要描述")
+    center_xy: list[float] = Field(description="可交互区中心坐标 [x, y]，0-1000")
+
+
+class PageKnowledge(BaseModel):
+    page: ParsedPage
+    areas: list[InteractiveArea]
+    llm_page: ParsedPage | None = None
+    yolo_boxes: list | None = None
+    img_size: tuple[int, int] | None = None
+
+
+def classify_elements(page: ParsedPage) -> list[InteractiveArea]:
+    """Group elements into tappable areas by leads_to + y proximity.
+
+    Uses the LLM-generated leads_to (semantic) combined with spatial
+    proximity — deterministic, no extra LLM call.
+    """
+    els = page.interactive_elements
+    if not els:
+        return []
+
+    # Sort by y, then x
+    indexed = sorted(range(len(els)), key=lambda i: (els[i].y, els[i].x))
+
+    # Cluster by y proximity, then split by leads_to within each cluster
+    groups: list[list[int]] = []
+    current: list[int] = []
+
+    for idx in indexed:
+        if not current:
+            current.append(idx)
+            continue
+
+        # y proximity check
+        min_y = min(els[i].y for i in current)
+        max_y = max(els[i].y for i in current)
+        el = els[idx]
+
+        if abs(el.y - min_y) < 40 or abs(el.y - max_y) < 40:
+            # Within y range — merge if leads_to compatible
+            current_leads = {els[i].leads_to for i in current if els[i].leads_to}
+            if not el.leads_to or not current_leads or el.leads_to in current_leads:
+                current.append(idx)
+                continue
+            # Same row but different target — split
+            groups.append(current)
+            current = [idx]
+        else:
+            # Different row
+            if current:
+                groups.append(current)
+            current = [idx]
+
+    if current:
+        groups.append(current)
+
+    # Build areas from groups
+    areas = []
+    for group in groups:
+        group_els = [els[i] for i in group]
+        rep = next((e for e in group_els if e.label.strip()), None)
+        if rep is None:
+            rep = next((e for e in group_els if e.leads_to), group_els[0])
+        areas.append(InteractiveArea(
+            label=rep.label[:8] if rep.label else rep.element_type,
+            target_page=rep.leads_to or rep.element_type,
+            description=rep.leads_to or "",
+            center_xy=[round(rep.x, 1), round(rep.y, 1)],
+        ))
+
+    areas.sort(key=lambda a: a.center_xy[1])
+    return areas
+
+
 SYSTEM_PROMPT = """\
 你是一个 iPhone 页面分析器。仔细分析截图，输出页面身份和所有可交互元素。
 
@@ -248,6 +326,37 @@ class PageParser:
         det = IconDetector(conf=0.1)
         boxes = det.detect_filtered(png_bytes, w, h)
         return enrich_with_icons(page, boxes, w, h)
+
+    def analyze_screen(self, png_bytes: bytes) -> PageKnowledge:
+        """Full pipeline: parse + YOLO merge + classify areas."""
+        import io
+
+        from PIL import Image
+
+        from policy_expr.recon.icon_detector import IconDetector
+
+        page = self.parse(png_bytes)
+
+        img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+        w, h = img.size
+        det = IconDetector(conf=0.1)
+        boxes = det.detect_filtered(png_bytes, w, h)
+
+        merged = enrich_with_icons(page, boxes, w, h)
+        print(f"  LLM: {len(page.interactive_elements)} 个 | "
+              f"YOLO: {len(boxes)} 个 | "
+              f"融合: {len(merged.interactive_elements)} 个")
+
+        areas = classify_elements(merged)
+        print(f"  区域数: {len(areas)}")
+
+        return PageKnowledge(
+            page=merged,
+            areas=areas,
+            llm_page=page,
+            yolo_boxes=boxes,
+            img_size=(w, h),
+        )
 
     def parse(self, png_bytes: bytes) -> ParsedPage:
         cfg = resolve_llm_config("action_policy")

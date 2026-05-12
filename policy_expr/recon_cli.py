@@ -45,12 +45,12 @@ def run_online(*, debug: bool = False) -> None:
         img_path.write_bytes(png_bytes)
         print(f"截图已保存: {img_path}")
 
-        print("解析中 (LLM + YOLO + merge)...")
-        page = PageParser().parse_screen(png_bytes)
-        viz_result(page, png_bytes, "initial", out_dir)
+        print("解析中 (LLM + YOLO + merge + 分组)...")
+        knowledge = PageParser().analyze_screen(png_bytes)
+        viz_result(knowledge, png_bytes, "initial", out_dir)
 
         result = probe_elements(
-            phone.client, page, out_dir, img_path, phone.screenshot,
+            phone.client, knowledge, out_dir, img_path, phone.screenshot,
             debug=debug,
         )
         result_path = out_dir / "recon_result.json"
@@ -96,9 +96,9 @@ def run_offline(paths: list[Path]) -> None:
         print(f"\n{'=' * 60}")
         print(f"图片: {img_path.name}")
         print(f"初始截图: {initial_path}")
-        print("解析中 (LLM + YOLO + merge)...")
-        page = parser.parse_screen(png_bytes)
-        viz_result(page, png_bytes, img_path.stem, out_dir)
+        print("解析中 (LLM + YOLO + merge + 分组)...")
+        knowledge = parser.analyze_screen(png_bytes)
+        viz_result(knowledge, png_bytes, img_path.stem, out_dir)
 
 
 def main() -> None:

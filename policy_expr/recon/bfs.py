@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from llm.structured import invoke_structured
 from policy_expr.config import resolve_llm_config
 from policy_expr.policies.base import resize_to_logical_png
-from policy_expr.recon.page_parser import ParsedPage
+from policy_expr.recon.page_parser import ParsedPage, PageKnowledge
 from policy_expr.recon.utils import (
     ReconResult,
     ScreenMatchDecision,
@@ -292,32 +292,22 @@ def return_to_initial(
 
 def probe_elements(
     client,
-    page: ParsedPage,
+    knowledge: PageKnowledge,
     out_dir: Path,
     initial_screenshot_path: Path | None = None,
     screenshot: Callable[[], bytes] | None = None,
     debug: bool = False,
 ) -> ReconResult:
-    """Tap each semantic element, capture after-state, return structured result.
-
-    For each element:
-    1. Tap at its logical coordinate
-    2. Screenshot the after-state
-    3. Go back (if element might have navigated away)
-    """
+    """Tap each area, capture after-state, return structured result."""
     from policy_expr.executor import logical_xy
 
-    targets = [
-        el for el in page.interactive_elements
-        if el.label or el.element_type == "back_button"
-    ]
-    print(f"\n{'=' * 60}")
-    print(f"点击探测: {len(targets)} 个语义元素")
-    print(f"{'=' * 60}")
-
+    page = knowledge.page
+    areas = knowledge.areas
     has_nav = page.bottom_nav.has_nav
-    if has_nav:
-        print("  检测到底部导航栏，tab 元素点击后不返回")
+
+    print(f"\n{'=' * 60}")
+    print(f"点击探测: {len(areas)} 个可交互区域")
+    print(f"{'=' * 60}")
 
     ident = page.identity
     result = ReconResult(
@@ -333,8 +323,6 @@ def probe_elements(
     initial_bytes = None
     if initial_screenshot_path and initial_screenshot_path.exists():
         initial_bytes = initial_screenshot_path.read_bytes()
-    elif initial_screenshot_path:
-        print(f"  初始截图不存在，跳过一致性检查: {initial_screenshot_path}")
     if screenshot is None:
         raise ValueError("probe_elements requires an SCK screenshot callable")
 
@@ -342,11 +330,11 @@ def probe_elements(
     tap_dir.mkdir(parents=True, exist_ok=True)
     result_path = out_dir / "recon_result.json"
 
-    targets = _order_targets(targets, has_nav)
-    for i, el in enumerate(targets, 1):
-        label = el.label or el.element_type
-        lx, ly = logical_xy(el.x, el.y)
-        print(f"\n  [{i}/{len(targets)}] 「{label}」 @ ({el.x:.0f},{el.y:.0f}) → ({lx:.0f},{ly:.0f})")
+    for i, area in enumerate(areas, 1):
+        ax, ay = area.center_xy
+        lx, ly = logical_xy(ax, ay)
+        is_tab = has_nav and ay > 900
+        print(f"\n  [{i}/{len(areas)}] 「{area.label}」 @ ({ax:.0f},{ay:.0f}) → ({lx:.0f},{ly:.0f})")
 
         tap_response = client.tap(lx, ly)
         tap_ok = "failed" not in tap_response.lower() and "interrupted" not in tap_response.lower()
@@ -354,36 +342,26 @@ def probe_elements(
         time.sleep(2.0)
 
         after_bytes = screenshot()
-        after_path = tap_dir / f"tap_{i:02d}_{el.element_type}.png"
+        after_path = tap_dir / f"tap_{i:02d}_{area.label}.png"
         if after_bytes:
             after_path.write_bytes(after_bytes)
             print(f"    截图: {after_path}")
 
-        navigated = el.element_type in ("link", "button", "menu_item")
-
         result.taps.append(TapResult(
             index=i,
-            element_type=el.element_type,
-            label=label,
-            x=el.x,
-            y=el.y,
+            element_type="tab" if is_tab else "area",
+            label=area.label,
+            x=ax,
+            y=ay,
             tap_ok=tap_ok,
             screenshot_path=str(after_path),
-            navigated=navigated,
+            navigated=not is_tab,
         ))
 
-        # Skip "go back" for: back_button, or tab elements when bottom nav exists
-        is_nav_tab = has_nav and el.element_type == "tab"
-        if el.element_type not in ("tab", "back_button") and not is_nav_tab:
+        if not is_tab:
             if initial_bytes and not return_to_initial(
-                client,
-                screenshot,
-                page,
-                initial_bytes,
-                after_bytes,
-                tap_dir,
-                i,
-                el.element_type,
+                client, screenshot, page, initial_bytes,
+                after_bytes, tap_dir, i, "area",
             ):
                 print("    返回后未回到初始界面，停止探测")
                 break
@@ -391,6 +369,6 @@ def probe_elements(
         result.save(result_path)
 
         if debug:
-            input("    [DEBUG] 按回车继续下一个元素...")
+            input("    [DEBUG] 按回车继续下一个区域...")
 
     return result
