@@ -1,7 +1,7 @@
 """CLI entry point for app reconnaissance: parse page structure from screenshots.
 
 Usage:
-    # Online: capture phone screen and analyze
+    # Online: capture phone screen, parse, and probe elements
     uv run python -m policy_expr.recon_cli
 
     # Offline: analyze existing image(s)
@@ -22,49 +22,41 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from policy_expr.recon import PageParser, print_result, visualize
+from policy_expr.recon import PageParser, viz_result
+from policy_expr.recon.bfs import probe_elements
 
 ROOT = Path(__file__).parent.parent
 LOG_ROOT = ROOT / "logs" / "recon"
 
 
-def process_image(parser: PageParser, img_path: Path, out_dir: Path) -> None:
-    """Parse one image: run pipeline, save JSON + viz, print result."""
-    png_bytes = img_path.read_bytes()
-    print(f"\n{'=' * 60}")
-    print(f"图片: {img_path.name}")
-
-    print("解析中 (LLM + YOLO + merge)...")
-    page = parser.parse_screen(png_bytes)
-    print_result(page)
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    json_path = out_dir / f"{img_path.stem}_result.json"
-    json_path.write_text(page.model_dump_json(indent=2), encoding="utf-8")
-
-    viz_path = out_dir / f"{img_path.stem}_viz.png"
-    viz_path.write_bytes(visualize(page, png_bytes))
-
-    print(f"\n  JSON : {json_path}")
-    print(f"  可视化 : {viz_path}")
-
-
 def run_online() -> None:
-    """Capture phone screen and analyze."""
+    """Capture phone screen, parse, and probe each element."""
     from policy_expr.perception import LivePhoneSession
 
     print("在线模式: 截取手机屏幕...")
     with LivePhoneSession() as phone:
+        out_dir = LOG_ROOT / "online"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
         png_bytes = phone.screenshot()
+        img_path = out_dir / "screenshot.png"
+        img_path.write_bytes(png_bytes)
+        print(f"截图已保存: {img_path}")
 
-    out_dir = LOG_ROOT / "online"
-    out_dir.mkdir(parents=True, exist_ok=True)
+        print("解析中 (LLM + YOLO + merge)...")
+        page = PageParser().parse_screen(png_bytes)
+        viz_result(page, png_bytes, "screenshot", out_dir)
 
-    img_path = out_dir / "screenshot.png"
-    img_path.write_bytes(png_bytes)
-    print(f"截图已保存: {img_path}")
+        result = probe_elements(phone.client, page, out_dir)
+        result_path = out_dir / "recon_result.json"
+        result.save(result_path)
 
-    process_image(PageParser(), img_path, out_dir)
+        print(f"\n{'=' * 60}")
+        print(f"探测完成: {len(result.taps)} 个元素")
+        ok = sum(1 for t in result.taps if t.tap_ok)
+        print(f"  成功: {ok}  失败: {len(result.taps) - ok}")
+        print(f"  结果: {result_path}")
+        print(f"{'=' * 60}")
 
 
 def run_offline(paths: list[Path]) -> None:
@@ -84,14 +76,19 @@ def run_offline(paths: list[Path]) -> None:
     parser = PageParser()
     out_dir = LOG_ROOT / "offline"
     for img_path in images:
-        process_image(parser, img_path, out_dir)
+        png_bytes = img_path.read_bytes()
+        print(f"\n{'=' * 60}")
+        print(f"图片: {img_path.name}")
+        print("解析中 (LLM + YOLO + merge)...")
+        page = parser.parse_screen(png_bytes)
+        viz_result(page, png_bytes, img_path.stem, out_dir)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="App Recon: 页面结构分析")
     ap.add_argument(
         "paths", nargs="*", type=Path,
-        help="图片文件或目录（留空则在线截图）",
+        help="图片文件或目录（留空则在线截图+探测）",
     )
     args = ap.parse_args()
 
