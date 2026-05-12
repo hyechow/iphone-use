@@ -81,9 +81,17 @@ class PageIdentity(BaseModel):
     )
 
 
+class BottomNav(BaseModel):
+    """底部导航栏检测结果。"""
+    has_nav: bool = Field(description="页面是否有底部导航栏（tab bar / 底部操作栏）")
+
+
 class ParsedPage(BaseModel):
     identity: PageIdentity
     description: str = Field(description="一句话描述该页面的功能或用途")
+    bottom_nav: BottomNav = Field(
+        description="底部导航栏区域，无则 y_start=y_end=-1"
+    )
     interactive_elements: list[InteractiveElement] = Field(
         description="页面上所有可点击/可交互的元素，按从上到下、从左到右排列"
     )
@@ -93,6 +101,10 @@ SYSTEM_PROMPT = """\
 你是一个 iPhone 页面分析器。仔细分析截图，输出页面身份和所有可交互元素。
 
 坐标系：左上角 (0, 0)，右下角 (1000, 1000)。坐标代表元素的视觉中心。
+
+## 底部导航栏（bottom_nav）
+判断页面是否有底部导航栏（tab bar / 底部操作栏）。有则 has_nav=true，无则 false。
+底部导航栏内的元素（tab）点击后通常只切换页面，不需要返回。
 
 ## 扫描方法（严格遵守）
 从上到下逐行扫描截图。对页面上每个可点击/可交互的区域，输出一条记录。
@@ -192,6 +204,7 @@ def enrich_with_icons(
     return ParsedPage(
         identity=page.identity,
         description=page.description,
+        bottom_nav=page.bottom_nav,
         interactive_elements=merged,
     )
 

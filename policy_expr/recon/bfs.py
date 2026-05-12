@@ -27,6 +27,10 @@ def probe_elements(client, page: ParsedPage, out_dir: Path) -> ReconResult:
     print(f"点击探测: {len(targets)} 个语义元素")
     print(f"{'=' * 60}")
 
+    has_nav = page.bottom_nav.has_nav
+    if has_nav:
+        print("  检测到底部导航栏，tab 元素点击后不返回")
+
     ident = page.identity
     result = ReconResult(
         app_name=ident.app_name,
@@ -66,7 +70,9 @@ def probe_elements(client, page: ParsedPage, out_dir: Path) -> ReconResult:
             navigated=navigated,
         ))
 
-        if el.element_type not in ("tab", "back_button"):
+        # Skip "go back" for: back_button, or tab elements when bottom nav exists
+        is_nav_tab = has_nav and el.element_type == "tab"
+        if el.element_type not in ("tab", "back_button") and not is_nav_tab:
             print("    返回...")
             blx, bly = logical_xy(85, 147)
             client.tap(blx, bly)
