@@ -1,5 +1,0 @@
-"""Execution limits for the ReAct loop."""
-
-MAX_REACT_ROUNDS = 1
-REACT_RECURSION_LIMIT = MAX_REACT_ROUNDS * 3 + 3
-POST_TOOL_SCREEN_SETTLE_SECONDS = 1.0

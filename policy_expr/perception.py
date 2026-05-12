@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from agent.sync_mcp_client import SyncMCPClient
+from policy_expr.sync_mcp_client import SyncMCPClient
 from policy_expr.schemas import Observation
 
 ROOT = Path(__file__).parent.parent

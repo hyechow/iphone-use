@@ -3,7 +3,7 @@
 import subprocess
 import time
 
-from agent.utils import paste_text
+from policy_expr.utils import paste_text
 from Quartz import (
     CGEventCreateMouseEvent,
     CGEventCreateScrollWheelEvent,
