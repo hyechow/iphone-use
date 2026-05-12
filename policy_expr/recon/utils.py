@@ -36,6 +36,7 @@ class ReconResult:
     signature: str
     description: str
     elements_count: int
+    initial_screenshot_path: str = ""
     taps: list[TapResult] = field(default_factory=list)
 
     def save(self, path: Path) -> None:
@@ -46,6 +47,7 @@ class ReconResult:
             "signature": self.signature,
             "description": self.description,
             "elements_count": self.elements_count,
+            "initial_screenshot": self.initial_screenshot_path,
             "taps": [
                 {
                     "index": t.index,
@@ -74,6 +76,85 @@ TYPE_COLOR: dict[str, tuple[int, int, int]] = {
     "icon": (0, 220, 220),
 }
 RADIUS = 12
+SCREEN_MATCH_SIZE = 64
+SCREEN_MATCH_THRESHOLD = 0.99
+SCREEN_DIFFERENT_THRESHOLD = 0.97
+
+
+@dataclass(frozen=True)
+class ScreenMatchDecision:
+    """Layered decision for whether a screen matches the initial page."""
+    matched: bool | None
+    similarity: float
+    method: str
+    reason: str
+
+
+def png_similarity(png1: bytes, png2: bytes, size: int = SCREEN_MATCH_SIZE) -> float:
+    """Return grayscale pixel similarity between two PNG images."""
+    img1 = Image.open(io.BytesIO(png1)).convert("L").resize((size, size))
+    img2 = Image.open(io.BytesIO(png2)).convert("L").resize((size, size))
+    total = sum(abs(int(a) - int(b)) for a, b in zip(img1.getdata(), img2.getdata()))
+    return 1.0 - total / (255 * size * size)
+
+
+def matches_initial(
+    initial_png: bytes,
+    current_png: bytes,
+    threshold: float = SCREEN_MATCH_THRESHOLD,
+) -> tuple[bool, float]:
+    """Return whether current PNG is close enough to the initial screen."""
+    similarity = png_similarity(initial_png, current_png)
+    return similarity >= threshold, similarity
+
+
+def decide_by_similarity(initial_png: bytes, current_png: bytes) -> ScreenMatchDecision:
+    """Use only image similarity when the result is clear, otherwise defer."""
+    similarity = png_similarity(initial_png, current_png)
+    if similarity >= SCREEN_MATCH_THRESHOLD:
+        return ScreenMatchDecision(True, similarity, "pixel", "similarity above match threshold")
+    if similarity <= SCREEN_DIFFERENT_THRESHOLD:
+        return ScreenMatchDecision(False, similarity, "pixel", "similarity below different threshold")
+    return ScreenMatchDecision(None, similarity, "pixel", "similarity in uncertain band")
+
+
+def same_page_by_structure(initial_page: ParsedPage, current_page: ParsedPage) -> tuple[bool, str]:
+    """Compare parsed page structure as a model-backed fallback."""
+    initial_ident = initial_page.identity
+    current_ident = current_page.identity
+    if initial_ident.signature and initial_ident.signature == current_ident.signature:
+        return True, "same signature"
+
+    same_identity = (
+        initial_ident.app_name == current_ident.app_name
+        and initial_ident.page_title == current_ident.page_title
+        and initial_ident.page_type == current_ident.page_type
+        and initial_page.bottom_nav.has_nav == current_page.bottom_nav.has_nav
+    )
+    if same_identity:
+        return True, "same identity fields"
+
+    initial_labels = {
+        (el.element_type, el.label.strip())
+        for el in initial_page.interactive_elements
+        if el.label.strip()
+    }
+    current_labels = {
+        (el.element_type, el.label.strip())
+        for el in current_page.interactive_elements
+        if el.label.strip()
+    }
+    if initial_labels and current_labels:
+        overlap = len(initial_labels & current_labels)
+        union = len(initial_labels | current_labels)
+        score = overlap / union
+        if score >= 0.7 and initial_ident.app_name == current_ident.app_name:
+            return True, f"element overlap {score:.2f}"
+
+    return False, (
+        f"different page structure: initial={initial_ident.signature!r}, "
+        f"current={current_ident.signature!r}"
+    )
 
 
 def _font(size: int = 14) -> ImageFont.ImageFont:

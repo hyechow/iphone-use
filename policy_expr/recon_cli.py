@@ -29,7 +29,7 @@ ROOT = Path(__file__).parent.parent
 LOG_ROOT = ROOT / "logs" / "recon"
 
 
-def run_online() -> None:
+def run_online(*, debug: bool = False) -> None:
     """Capture phone screen, parse, and probe each element."""
     from policy_expr.perception import LivePhoneSession
 
@@ -39,15 +39,18 @@ def run_online() -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
 
         png_bytes = phone.screenshot()
-        img_path = out_dir / "screenshot.png"
+        img_path = out_dir / "initial.png"
         img_path.write_bytes(png_bytes)
         print(f"截图已保存: {img_path}")
 
         print("解析中 (LLM + YOLO + merge)...")
         page = PageParser().parse_screen(png_bytes)
-        viz_result(page, png_bytes, "screenshot", out_dir)
+        viz_result(page, png_bytes, "initial", out_dir)
 
-        result = probe_elements(phone.client, page, out_dir)
+        result = probe_elements(
+            phone.client, page, out_dir, img_path, phone.screenshot,
+            debug=debug,
+        )
         result_path = out_dir / "recon_result.json"
         result.save(result_path)
 
@@ -77,8 +80,12 @@ def run_offline(paths: list[Path]) -> None:
     out_dir = LOG_ROOT / "offline"
     for img_path in images:
         png_bytes = img_path.read_bytes()
+        initial_path = out_dir / f"{img_path.stem}_initial.png"
+        initial_path.parent.mkdir(parents=True, exist_ok=True)
+        initial_path.write_bytes(png_bytes)
         print(f"\n{'=' * 60}")
         print(f"图片: {img_path.name}")
+        print(f"初始截图: {initial_path}")
         print("解析中 (LLM + YOLO + merge)...")
         page = parser.parse_screen(png_bytes)
         viz_result(page, png_bytes, img_path.stem, out_dir)
@@ -90,12 +97,13 @@ def main() -> None:
         "paths", nargs="*", type=Path,
         help="图片文件或目录（留空则在线截图+探测）",
     )
+    ap.add_argument("--debug", action="store_true", help="调试模式，每个元素暂停")
     args = ap.parse_args()
 
     if args.paths:
         run_offline(args.paths)
     else:
-        run_online()
+        run_online(debug=args.debug)
 
 
 if __name__ == "__main__":

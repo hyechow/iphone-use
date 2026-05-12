@@ -2,14 +2,302 @@
 
 from __future__ import annotations
 
+import base64
 import time
+from collections.abc import Callable
 from pathlib import Path
 
+import numpy as np
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
+
+from llm.structured import invoke_structured
+from policy_expr.config import resolve_llm_config
+from policy_expr.policies.base import resize_to_logical_png
 from policy_expr.recon.page_parser import ParsedPage
-from policy_expr.recon.utils import ReconResult, TapResult
+from policy_expr.recon.utils import (
+    ReconResult,
+    ScreenMatchDecision,
+    TapResult,
+    SCREEN_MATCH_THRESHOLD,
+    png_similarity,
+)
 
 
-def probe_elements(client, page: ParsedPage, out_dir: Path) -> ReconResult:
+BACK_TAP_CENTER = (70.0, 125.0)
+BACK_TAP_JITTER = (3.0, 3.0)
+BACK_SETTLE_SECONDS = 1.5
+BACK_ACTION_NO_CHANGE_THRESHOLD = 0.995
+BACK_MATCH_THRESHOLD = 0.989
+BACK_TAP_POINTS = (
+    BACK_TAP_CENTER,
+    (45.0, 125.0),
+)
+BACK_SWIPE_START = (12.0, 500.0)
+BACK_SWIPE_END = (620.0, 500.0)
+
+
+class BackAction(BaseModel):
+    can_go_back: bool = Field(description="能否找到返回到前一页的方法")
+    method: str = Field(description="返回方法描述")
+    back_x: float = Field(default=-1, description="返回目标归一化 x 坐标（0-1000）")
+    back_y: float = Field(default=-1, description="返回目标归一化 y 坐标（0-1000）")
+
+
+BACK_PROMPT = """\
+你是一个手机页面导航分析器。
+
+用户给出了两张截图：
+- 第一张（BEFORE）：点击前的原始页面
+- 第二张（AFTER）：点击某个元素后跳转到的页面
+
+请分析 AFTER 页面上有什么方法可以返回到 BEFORE 页面。
+
+常见的返回方式：
+1. 左上角返回按钮（< 箭头）→ 点击它
+2. 底部 tab 栏中的某个 tab → 点击对应 tab
+3. 关闭按钮（×）→ 点击它
+
+输出：
+- can_go_back: 是否能找到返回方法
+- method: 描述返回方法
+- back_x, back_y: 返回目标坐标（0-1000，左上角原点）
+"""
+
+
+def _is_navigation_target(el, has_nav: bool) -> bool:
+    return el.element_type == "back_button" or (has_nav and el.element_type == "tab")
+
+
+def _order_targets(targets: list, has_nav: bool) -> list:
+    content_targets = [el for el in targets if not _is_navigation_target(el, has_nav)]
+    nav_targets = [el for el in targets if _is_navigation_target(el, has_nav)]
+    np.random.shuffle(content_targets)
+    return content_targets + nav_targets
+
+
+def _matches_initial_layered(
+    initial_page: ParsedPage,
+    initial_png: bytes,
+    current_png: bytes | None,
+    initial_fingerprint: str | None = None,
+) -> ScreenMatchDecision:
+    if not current_png:
+        return ScreenMatchDecision(False, 0.0, "screenshot", "missing current screenshot")
+
+    # Level 1: pixel similarity (fast, free)
+    similarity = png_similarity(initial_png, current_png)
+    if similarity >= BACK_MATCH_THRESHOLD:
+        return ScreenMatchDecision(
+            True,
+            similarity,
+            "pixel",
+            f"similarity above back match threshold {BACK_MATCH_THRESHOLD}",
+        )
+
+    # Level 2: fingerprint comparison (one LLM call)
+    print(
+        f"    相似度 {similarity:.5f} < {BACK_MATCH_THRESHOLD:.3f}，"
+        "使用 fingerprint 判断..."
+    )
+    from policy_expr.recon.fingerprint import compute_fingerprint
+
+    if initial_fingerprint is None:
+        initial_fingerprint = compute_fingerprint(initial_png).key
+    current_fingerprint = compute_fingerprint(current_png).key
+    matched = initial_fingerprint == current_fingerprint
+    reason = f"fingerprint {'match' if matched else 'mismatch'}: [{current_fingerprint}]"
+    return ScreenMatchDecision(matched, similarity, "fingerprint", reason)
+
+
+def _print_match_decision(prefix: str, decision: ScreenMatchDecision) -> None:
+    print(
+        f"    {prefix}: {decision.similarity:.5f} "
+        f"({decision.method}: {decision.reason})"
+    )
+
+
+def _back_tap_point(attempt: int) -> tuple[float, float]:
+    point = BACK_TAP_POINTS[(attempt - 1) % len(BACK_TAP_POINTS)]
+    if attempt <= len(BACK_TAP_POINTS):
+        return point
+    return (
+        point[0] + np.random.uniform(-BACK_TAP_JITTER[0], BACK_TAP_JITTER[0]),
+        point[1] + np.random.uniform(-BACK_TAP_JITTER[1], BACK_TAP_JITTER[1]),
+    )
+
+
+def tap_back(client, attempt: int = 1) -> tuple[float, float, str]:
+    """Tap near the iOS back button."""
+    from policy_expr.executor import logical_xy
+
+    ax, ay = _back_tap_point(attempt)
+    lx, ly = logical_xy(ax, ay)
+    result = client.tap(lx, ly)
+    return lx, ly, result
+
+
+def tap_llm_back(client, action: BackAction) -> tuple[float, float, str]:
+    """Tap the return target selected by the vision model."""
+    from policy_expr.executor import logical_xy
+
+    lx, ly = logical_xy(action.back_x, action.back_y)
+    result = client.tap(lx, ly)
+    return lx, ly, result
+
+
+def swipe_back(client) -> tuple[tuple[float, float], tuple[float, float], str]:
+    """Use the iOS left-edge back gesture as a final fallback."""
+    from policy_expr.executor import logical_xy
+
+    start_x, start_y = logical_xy(*BACK_SWIPE_START)
+    end_x, end_y = logical_xy(*BACK_SWIPE_END)
+    if not hasattr(client, "swipe"):
+        return (start_x, start_y), (end_x, end_y), "swipe unavailable"
+    result = client.swipe(start_x, start_y, end_x, end_y, duration_ms=450)
+    return (start_x, start_y), (end_x, end_y), result
+
+
+BACK_MAX_RETRIES = len(BACK_TAP_POINTS) + 1
+
+
+def infer_back_action(before_png: bytes, after_png: bytes | None) -> BackAction | None:
+    """Ask the vision model how to navigate from AFTER back to BEFORE."""
+    if not after_png:
+        return None
+
+    cfg = resolve_llm_config("action_policy")
+    llm = ChatOpenAI(
+        model=cfg.model,
+        api_key=cfg.api_key,
+        base_url=cfg.base_url,
+        temperature=0,
+    )
+    before_b64 = base64.b64encode(resize_to_logical_png(before_png)).decode()
+    after_b64 = base64.b64encode(resize_to_logical_png(after_png)).decode()
+    messages = [
+        SystemMessage(content=BACK_PROMPT),
+        HumanMessage(content=[
+            {
+                "type": "text",
+                "text": (
+                    "第一张(BEFORE)是点击前的页面，第二张(AFTER)是点击后跳转的页面。"
+                    "请找出从 AFTER 返回 BEFORE 的方法。"
+                ),
+            },
+            {"type": "text", "text": "BEFORE（点击前）:"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{before_b64}"}},
+            {"type": "text", "text": "AFTER（点击后）:"},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{after_b64}"}},
+        ]),
+    ]
+    action = invoke_structured(llm, messages, BackAction)
+    print(
+        f"    LLM 返回建议: can_back={action.can_go_back}, "
+        f"method={action.method}, coords=({action.back_x:.0f},{action.back_y:.0f})"
+    )
+    if not action.can_go_back:
+        return None
+    if not (0 <= action.back_x <= 1000 and 0 <= action.back_y <= 1000):
+        return None
+    return action
+
+
+def _tap_back_once(
+    client,
+    screenshot: Callable[[], bytes],
+    initial_page: ParsedPage,
+    initial_bytes: bytes,
+    before_back_bytes: bytes | None,
+    tap_dir: Path,
+    index: int,
+    element_type: str,
+    initial_fingerprint: str | None,
+    attempt: int,
+    llm_back_action: BackAction | None = None,
+) -> tuple[bool, str | None]:
+    """One attempt to go back. Returns (matched, fingerprint)."""
+
+    if llm_back_action is not None:
+        lx, ly, response = tap_llm_back(client, llm_back_action)
+        print(f"    返回尝试 LLM: {llm_back_action.method} ({lx:.0f},{ly:.0f})")
+    elif attempt <= len(BACK_TAP_POINTS):
+        lx, ly, response = tap_back(client, attempt)
+        print(f"    返回尝试 {attempt}: 点左上角 ({lx:.0f},{ly:.0f})")
+    else:
+        (sx, sy), (ex, ey), response = swipe_back(client)
+        print(f"    返回尝试 {attempt}: 左边缘右滑 ({sx:.0f},{sy:.0f}) → ({ex:.0f},{ey:.0f})")
+    if response:
+        print(f"    返回结果: {response}")
+    time.sleep(BACK_SETTLE_SECONDS)
+
+    back_bytes = screenshot()
+    back_path = tap_dir / f"tap_{index:02d}_{element_type}_back_{attempt}.png"
+    if back_bytes:
+        back_path.write_bytes(back_bytes)
+
+    if before_back_bytes and back_bytes:
+        action_similarity = png_similarity(before_back_bytes, back_bytes)
+        if action_similarity >= BACK_ACTION_NO_CHANGE_THRESHOLD:
+            print(
+                f"    返回动作前后相似度 {action_similarity:.4f}，"
+                "页面未变化，继续尝试下一个返回动作"
+            )
+            return False, initial_fingerprint
+
+    decision = _matches_initial_layered(initial_page, initial_bytes, back_bytes, initial_fingerprint)
+    attempt_label = "LLM" if llm_back_action is not None else str(attempt)
+    _print_match_decision(f"  返回尝试 {attempt_label}", decision)
+    return bool(decision.matched), initial_fingerprint
+
+
+def return_to_initial(
+    client,
+    screenshot: Callable[[], bytes],
+    initial_page: ParsedPage,
+    initial_bytes: bytes,
+    before_back_bytes: bytes | None,
+    tap_dir: Path,
+    index: int,
+    element_type: str,
+    initial_fingerprint: str | None = None,
+) -> bool:
+    """Navigate back to the initial page, retrying up to BACK_MAX_RETRIES times."""
+    fp = initial_fingerprint
+    clicked_page_bytes = before_back_bytes
+
+    for attempt in range(1, BACK_MAX_RETRIES + 1):
+        matched, fp = _tap_back_once(
+            client, screenshot, initial_page, initial_bytes,
+            before_back_bytes, tap_dir, index, element_type, fp, attempt,
+        )
+        if matched:
+            return True
+        before_back_bytes = screenshot()
+
+    llm_action = infer_back_action(initial_bytes, clicked_page_bytes)
+    if llm_action is not None:
+        matched, fp = _tap_back_once(
+            client, screenshot, initial_page, initial_bytes,
+            before_back_bytes, tap_dir, index, element_type, fp, 0,
+            llm_back_action=llm_action,
+        )
+        if matched:
+            return True
+
+    print(f"    {BACK_MAX_RETRIES} 次返回尝试后仍未回到初始页面")
+    return False
+
+
+def probe_elements(
+    client,
+    page: ParsedPage,
+    out_dir: Path,
+    initial_screenshot_path: Path | None = None,
+    screenshot: Callable[[], bytes] | None = None,
+    debug: bool = False,
+) -> ReconResult:
     """Tap each semantic element, capture after-state, return structured result.
 
     For each element:
@@ -39,8 +327,22 @@ def probe_elements(client, page: ParsedPage, out_dir: Path) -> ReconResult:
         signature=ident.signature,
         description=page.description,
         elements_count=len(page.interactive_elements),
+        initial_screenshot_path=str(initial_screenshot_path or ""),
     )
 
+    initial_bytes = None
+    if initial_screenshot_path and initial_screenshot_path.exists():
+        initial_bytes = initial_screenshot_path.read_bytes()
+    elif initial_screenshot_path:
+        print(f"  初始截图不存在，跳过一致性检查: {initial_screenshot_path}")
+    if screenshot is None:
+        raise ValueError("probe_elements requires an SCK screenshot callable")
+
+    tap_dir = out_dir / "tap"
+    tap_dir.mkdir(parents=True, exist_ok=True)
+    result_path = out_dir / "recon_result.json"
+
+    targets = _order_targets(targets, has_nav)
     for i, el in enumerate(targets, 1):
         label = el.label or el.element_type
         lx, ly = logical_xy(el.x, el.y)
@@ -51,8 +353,8 @@ def probe_elements(client, page: ParsedPage, out_dir: Path) -> ReconResult:
         print(f"    结果: {tap_response}")
         time.sleep(2.0)
 
-        after_bytes = client.screenshot() if hasattr(client, "screenshot") else b""
-        after_path = out_dir / f"tap_{i:02d}_{el.element_type}.png"
+        after_bytes = screenshot()
+        after_path = tap_dir / f"tap_{i:02d}_{el.element_type}.png"
         if after_bytes:
             after_path.write_bytes(after_bytes)
             print(f"    截图: {after_path}")
@@ -73,9 +375,22 @@ def probe_elements(client, page: ParsedPage, out_dir: Path) -> ReconResult:
         # Skip "go back" for: back_button, or tab elements when bottom nav exists
         is_nav_tab = has_nav and el.element_type == "tab"
         if el.element_type not in ("tab", "back_button") and not is_nav_tab:
-            print("    返回...")
-            blx, bly = logical_xy(85, 147)
-            client.tap(blx, bly)
-            time.sleep(1.5)
+            if initial_bytes and not return_to_initial(
+                client,
+                screenshot,
+                page,
+                initial_bytes,
+                after_bytes,
+                tap_dir,
+                i,
+                el.element_type,
+            ):
+                print("    返回后未回到初始界面，停止探测")
+                break
+
+        result.save(result_path)
+
+        if debug:
+            input("    [DEBUG] 按回车继续下一个元素...")
 
     return result
