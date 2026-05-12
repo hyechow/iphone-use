@@ -157,6 +157,15 @@ def classify_elements(page: ParsedPage) -> list[InteractiveArea]:
     if current:
         groups.append(current)
 
+    ICON_LABEL = {
+        "search": "搜索", "settings": "设置", "close": "关闭",
+        "share": "分享", "more": "更多", "notification": "通知",
+        "profile": "头像", "camera": "相机", "scan": "扫码",
+        "add": "新建", "edit": "编辑", "delete": "删除",
+        "favorite": "收藏", "filter": "筛选", "download": "下载",
+        "message": "消息", "map": "地图", "other": "图标",
+    }
+
     # Build areas from groups
     areas = []
     for group in groups:
@@ -164,9 +173,17 @@ def classify_elements(page: ParsedPage) -> list[InteractiveArea]:
         rep = next((e for e in group_els if e.label.strip()), None)
         if rep is None:
             rep = next((e for e in group_els if e.leads_to), group_els[0])
+        if rep.label:
+            label = rep.label[:8]
+        elif rep.icon_semantic and rep.icon_semantic in ICON_LABEL:
+            label = ICON_LABEL[rep.icon_semantic]
+        elif rep.leads_to:
+            label = rep.leads_to[:6]
+        else:
+            label = "图标"
         areas.append(InteractiveArea(
-            label=rep.label[:8] if rep.label else rep.element_type,
-            target_page=rep.leads_to or rep.element_type,
+            label=label,
+            target_page=rep.leads_to or "",
             description=rep.leads_to or "",
             center_xy=[round(rep.x, 1), round(rep.y, 1)],
         ))

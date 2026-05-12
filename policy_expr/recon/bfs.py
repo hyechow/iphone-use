@@ -69,14 +69,6 @@ BACK_PROMPT = """\
 def _is_navigation_target(el, has_nav: bool) -> bool:
     return el.element_type == "back_button" or (has_nav and el.element_type == "tab")
 
-
-def _order_targets(targets: list, has_nav: bool) -> list:
-    content_targets = [el for el in targets if not _is_navigation_target(el, has_nav)]
-    nav_targets = [el for el in targets if _is_navigation_target(el, has_nav)]
-    np.random.shuffle(content_targets)
-    return content_targets + nav_targets
-
-
 def _matches_initial_layered(
     initial_page: ParsedPage,
     initial_png: bytes,
