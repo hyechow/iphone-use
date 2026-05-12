@@ -1,4 +1,4 @@
-"""CLI entry point for app reconnaissance: parse page structure from screenshots.
+"""CLI entry point for app reconnaissance and self-learning.
 
 Usage:
     # Online: capture phone screen, parse, and probe elements
@@ -7,6 +7,9 @@ Usage:
     # Offline: analyze existing image(s)
     uv run python -m policy_expr.recon_cli images/recon/
     uv run python -m policy_expr.recon_cli images/recon/policy_xxx.png
+
+    # Self-learning: build page flows from recon result
+    uv run python -m policy_expr.recon_cli --learn logs/recon/online_x/recon_result.json
 """
 
 from __future__ import annotations
@@ -101,16 +104,39 @@ def run_offline(paths: list[Path]) -> None:
         viz_result(knowledge, png_bytes, img_path.stem, out_dir)
 
 
+def run_learn(recon_path: Path) -> None:
+    """Build page flow descriptions from a recon result."""
+    from policy_expr.self_learning.flow import build_page_flows, save_page_flows
+
+    print(f"自学习模式: 从侦察结果生成功能描述...")
+    print(f"输入: {recon_path}")
+
+    page_flow = build_page_flows(recon_path)
+
+    out_path = recon_path.parent / "page_flows.json"
+    save_page_flows(page_flow, out_path)
+
+    print(f"\n{'=' * 60}")
+    print(f"功能流程: {len(page_flow.flows)} 条")
+    for f in page_flow.flows:
+        print(f"  {f.flow_description}")
+    print(f"结果: {out_path}")
+    print(f"{'=' * 60}")
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description="App Recon: 页面结构分析")
+    ap = argparse.ArgumentParser(description="App Recon: 页面结构分析与自学习")
     ap.add_argument(
         "paths", nargs="*", type=Path,
         help="图片文件或目录（留空则在线截图+探测）",
     )
     ap.add_argument("--debug", action="store_true", help="调试模式，每个元素暂停")
+    ap.add_argument("--learn", type=Path, metavar="JSON", help="从侦察结果生成功能流程描述")
     args = ap.parse_args()
 
-    if args.paths:
+    if args.learn:
+        run_learn(args.learn)
+    elif args.paths:
         run_offline(args.paths)
     else:
         run_online(debug=args.debug)
