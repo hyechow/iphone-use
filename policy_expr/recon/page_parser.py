@@ -199,7 +199,23 @@ def enrich_with_icons(
 class PageParser:
     """Parse a screenshot into structured page identity and interactive elements."""
 
-    _N_ATTEMPTS = 2
+    _N_ATTEMPTS = 1
+
+    def parse_screen(self, png_bytes: bytes) -> ParsedPage:
+        """Full pipeline: LLM parse → YOLO detect → point-in-box merge."""
+        import io
+
+        from PIL import Image
+
+        from policy_expr.recon.icon_detector import IconDetector
+
+        page = self.parse(png_bytes)
+
+        img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+        w, h = img.size
+        det = IconDetector(conf=0.05)
+        boxes = det.detect_filtered(png_bytes, w, h)
+        return enrich_with_icons(page, boxes, w, h)
 
     def parse(self, png_bytes: bytes) -> ParsedPage:
         cfg = resolve_llm_config("action_policy")
