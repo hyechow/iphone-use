@@ -185,6 +185,25 @@ def enrich_with_icons(
                 matched_boxes.add(bi)
                 matched = True
                 break
+        if not matched and el.element_type == "icon" and el.icon_semantic == "add":
+            candidates = [
+                (bi, bbox) for bi, bbox in enumerate(icon_bboxes)
+                if bi not in matched_boxes
+                and bbox.cx / img_w * 1000 >= 750
+                and 120 <= bbox.cy / img_h * 1000 <= 220
+            ]
+            if candidates:
+                bi, bbox = max(candidates, key=lambda item: item[1].conf)
+                merged.append(InteractiveElement(
+                    label=el.label,
+                    element_type=el.element_type,
+                    icon_semantic=el.icon_semantic,
+                    x=round(bbox.cx / img_w * 1000, 1),
+                    y=round(bbox.cy / img_h * 1000, 1),
+                    leads_to=el.leads_to,
+                ))
+                matched_boxes.add(bi)
+                matched = True
         if not matched:
             merged.append(el)
 
@@ -226,7 +245,7 @@ class PageParser:
 
         img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
         w, h = img.size
-        det = IconDetector(conf=0.05)
+        det = IconDetector(conf=0.1)
         boxes = det.detect_filtered(png_bytes, w, h)
         return enrich_with_icons(page, boxes, w, h)
 

@@ -59,15 +59,17 @@ class IconDetector:
         png_bytes: bytes,
         img_w: int,
         img_h: int,
-        nav_bar_y: int = 140,
+        nav_bar_y: int = 200,
         max_width_ratio: float = 0.8,
         overlap_thresh: float = 0.8,
+        min_gray_std: float = 5.0,
     ) -> list[IconBbox]:
         """Detect icons and apply three-layer filtering.
 
         1. Remove navigation bar noise (cy < nav_bar_y)
         2. Remove wide boxes (width > max_width_ratio * img_w)
-        3. Merge small boxes whose area >= overlap_thresh is inside a larger box
+        3. Remove visually blank boxes (low grayscale standard deviation)
+        4. Merge small boxes whose area >= overlap_thresh is inside a larger box
         """
         boxes = self.detect(png_bytes)
 
@@ -78,7 +80,14 @@ class IconDetector:
         max_w = img_w * max_width_ratio
         boxes = [b for b in boxes if (b.x2 - b.x1) <= max_w]
 
-        # Filter 3: overlap-based dedup (larger boxes absorb smaller ones)
+        # Filter 3: visually blank boxes
+        gray = Image.open(io.BytesIO(png_bytes)).convert("L")
+        boxes = [
+            b for b in boxes
+            if _gray_std(gray, b) >= min_gray_std
+        ]
+
+        # Filter 4: overlap-based dedup (larger boxes absorb smaller ones)
         def _overlap_ratio(small: IconBbox, big: IconBbox) -> float:
             ix1 = max(small.x1, big.x1)
             iy1 = max(small.y1, big.y1)
@@ -99,3 +108,21 @@ class IconDetector:
                 if _overlap_ratio(sorted_boxes[j], big) >= overlap_thresh:
                     covered.add(j)
         return [b for i, b in enumerate(sorted_boxes) if i not in covered]
+
+
+def _gray_std(img: Image.Image, box: IconBbox) -> float:
+    crop = img.crop((
+        max(0, int(box.x1)),
+        max(0, int(box.y1)),
+        min(img.width, int(box.x2)),
+        min(img.height, int(box.y2)),
+    ))
+    if crop.width <= 0 or crop.height <= 0:
+        return 0.0
+    hist = crop.histogram()
+    total = sum(hist)
+    if total <= 0:
+        return 0.0
+    mean = sum(i * count for i, count in enumerate(hist)) / total
+    variance = sum(((i - mean) ** 2) * count for i, count in enumerate(hist)) / total
+    return variance ** 0.5
