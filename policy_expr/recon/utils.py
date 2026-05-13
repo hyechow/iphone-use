@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from policy_expr.recon.page_parser import ParsedPage
@@ -91,11 +92,18 @@ class ScreenMatchDecision:
 
 
 def png_similarity(png1: bytes, png2: bytes, size: int = SCREEN_MATCH_SIZE) -> float:
-    """Return grayscale pixel similarity between two PNG images."""
-    img1 = Image.open(io.BytesIO(png1)).convert("L").resize((size, size))
-    img2 = Image.open(io.BytesIO(png2)).convert("L").resize((size, size))
-    total = sum(abs(int(a) - int(b)) for a, b in zip(img1.getdata(), img2.getdata()))
-    return 1.0 - total / (255 * size * size)
+    """Return SSIM between two PNG images (structural similarity, robust to dynamic content)."""
+    img1 = np.array(Image.open(io.BytesIO(png1)).convert("L").resize((size, size)), dtype=np.float64)
+    img2 = np.array(Image.open(io.BytesIO(png2)).convert("L").resize((size, size)), dtype=np.float64)
+    mu1 = img1.mean()
+    mu2 = img2.mean()
+    sigma1_sq = img1.var()
+    sigma2_sq = img2.var()
+    sigma12 = ((img1 - mu1) * (img2 - mu2)).mean()
+    c1 = (0.01 * 255) ** 2
+    c2 = (0.03 * 255) ** 2
+    ssim = ((2 * mu1 * mu2 + c1) * (2 * sigma12 + c2)) / ((mu1**2 + mu2**2 + c1) * (sigma1_sq + sigma2_sq + c2))
+    return float(ssim)
 
 
 def matches_initial(

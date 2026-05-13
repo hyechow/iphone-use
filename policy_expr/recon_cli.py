@@ -94,8 +94,8 @@ def _probe_page(phone, knowledge, png_bytes, out_dir: Path, sample: int = 0,
                             sample=sample, parent_bytes=parent_bytes, re_nav=re_nav)
     result.save(out_dir / "recon_result.json")
 
-    ok = sum(1 for t in result.taps if t.tap_ok)
-    print(f"  探测完成: {len(result.taps)} 个元素 (成功 {ok})")
+    ok = sum(1 for t in result.taps if t.tap_ok and t.navigated)
+    print(f"  探测完成: {len(result.taps)} 个元素 (成功导航 {ok})")
 
     return result, out_dir
 
@@ -132,7 +132,7 @@ def run_app(app: str, depth: int = 0, sample: int = 0) -> None:
                 ok, _ = return_to_initial(
                     phone.client, phone.screenshot,
                     root_bytes,
-                    None, root_out / "tap", 0, "back",
+                    None,
                 )
                 if not ok:
                     print(f"\n  \033[31m✗ 返回根页面失败，跳过: {[l for _, _, l in nav_chain]}\033[0m")
@@ -171,7 +171,7 @@ def run_app(app: str, depth: int = 0, sample: int = 0) -> None:
             if cur_depth <= 0:
                 continue
 
-            n_children = sum(1 for t in result.taps if t.tap_ok)
+            n_children = sum(1 for t in result.taps if t.tap_ok and t.navigated)
             if n_children:
                 input(f"  发现 {n_children} 个可导航子页面，按回车继续探索...")
             if root_ctx is None:

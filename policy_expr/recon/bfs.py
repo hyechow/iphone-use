@@ -28,8 +28,8 @@ from policy_expr.recon.utils import (
 BACK_TAP_CENTER = (70.0, 125.0)
 BACK_TAP_JITTER = (3.0, 3.0)
 BACK_SETTLE_SECONDS = 1.5
-BACK_ACTION_NO_CHANGE_THRESHOLD = 0.995
-BACK_MATCH_THRESHOLD = 0.989
+BACK_ACTION_NO_CHANGE_THRESHOLD = 0.95
+BACK_MATCH_THRESHOLD = 0.88
 BACK_TAP_POINTS = (
     BACK_TAP_CENTER,
     (45.0, 125.0),
@@ -142,6 +142,7 @@ def swipe_back(client) -> tuple[tuple[float, float], tuple[float, float], str]:
 
 
 BACK_MAX_RETRIES = len(BACK_TAP_POINTS)
+LLM_BACK_MAX_RETRIES = 3
 
 
 
@@ -188,9 +189,6 @@ def _tap_back_once(
     screenshot: Callable[[], bytes],
     initial_bytes: bytes,
     before_back_bytes: bytes | None,
-    tap_dir: Path,
-    index: int,
-    element_type: str,
     initial_fingerprint: str | None,
     attempt: int,
     llm_back_action: BackAction | None = None,
@@ -210,9 +208,6 @@ def _tap_back_once(
     time.sleep(BACK_SETTLE_SECONDS)
 
     back_bytes = screenshot()
-    back_path = tap_dir / f"tap_{index:02d}_{element_type}_back_{attempt}.png"
-    if back_bytes:
-        back_path.write_bytes(back_bytes)
 
     if before_back_bytes and back_bytes:
         action_similarity = png_similarity(before_back_bytes, back_bytes)
@@ -238,9 +233,6 @@ def return_to_initial(
     screenshot: Callable[[], bytes],
     initial_bytes: bytes,
     before_back_bytes: bytes | None,
-    tap_dir: Path,
-    index: int,
-    element_type: str,
     initial_fingerprint: str | None = None,
     parent_bytes: bytes | None = None,
 ) -> tuple[bool, bool]:
@@ -254,7 +246,7 @@ def return_to_initial(
     for attempt in range(1, BACK_MAX_RETRIES + 1):
         matched, on_parent, fp = _tap_back_once(
             client, screenshot, initial_bytes,
-            before_back_bytes, tap_dir, index, element_type, fp, attempt,
+            before_back_bytes, fp, attempt,
             parent_bytes=parent_bytes,
         )
         if matched:
@@ -263,20 +255,25 @@ def return_to_initial(
             return False, True
         before_back_bytes = screenshot()
 
-    # LLM fallback: ask vision model for back action
-    llm_action = infer_back_action(initial_bytes, clicked_page_bytes)
-    if llm_action is not None:
+    # LLM fallback: ask vision model for back action, up to LLM_BACK_MAX_RETRIES times
+    llm_bytes = clicked_page_bytes
+    for llm_attempt in range(1, LLM_BACK_MAX_RETRIES + 1):
+        llm_action = infer_back_action(initial_bytes, llm_bytes)
+        if llm_action is None:
+            print(f"    [LLM] 第 {llm_attempt} 次未能识别返回动作")
+            break
         matched, on_parent, fp = _tap_back_once(
             client, screenshot, initial_bytes,
-            before_back_bytes, tap_dir, index, element_type, fp, 0,
+            before_back_bytes, fp, 0,
             llm_back_action=llm_action, parent_bytes=parent_bytes,
         )
         if matched:
             return True, False
         if on_parent:
             return False, True
+        llm_bytes = screenshot()
 
-    print(f"    {BACK_MAX_RETRIES} 次返回尝试后仍未回到初始页面")
+    print(f"    {BACK_MAX_RETRIES} 次预定义 + {LLM_BACK_MAX_RETRIES} 次 LLM 返回尝试后仍未回到初始页面")
     return False, False
 
 
@@ -362,7 +359,7 @@ def probe_elements(
             print(f"    截图: {after_path}")
 
         navigated = False
-        if not is_tab and after_bytes and initial_bytes:
+        if after_bytes and initial_bytes:
             sim = png_similarity(initial_bytes, after_bytes)
             if sim >= BACK_ACTION_NO_CHANGE_THRESHOLD:
                 print(f"    页面未变化 (相似度 {sim:.3f})，跳过")
@@ -380,7 +377,7 @@ def probe_elements(
             navigated=navigated,
         ))
 
-        if not is_tab and navigated:
+        if navigated:
             # Fast parent check on the immediate tap result (before any back attempts)
             on_parent = bool(
                 parent_bytes and after_bytes
@@ -389,7 +386,7 @@ def probe_elements(
             if not on_parent and initial_bytes:
                 matched, on_parent = return_to_initial(
                     client, screenshot, initial_bytes,
-                    after_bytes, tap_dir, i, "area",
+                    after_bytes,
                     parent_bytes=parent_bytes,
                 )
                 if not matched and not on_parent:
@@ -417,7 +414,7 @@ def probe_elements(
         if not decision.matched:
             matched, _ = return_to_initial(
                 client, screenshot, initial_bytes,
-                current_bytes, tap_dir, 0, "final",
+                current_bytes,
             )
             if not matched:
                 raise RuntimeError("探测完成后无法返回初始页面，终止")
