@@ -48,3 +48,8 @@ uv run python policy_expr/recon_cli.py
 - `sck/` — SCStream 截图服务
 - `bin/` — 预编译二进制
 - `scripts/` — 测试脚本
+
+## 知识库的构建过程
+ - @knowledge 目录下各种有个app目录，目录XX页的说明，XX.md
+ - recon 如果有输入 --app，首先检查这个页面有没有在@knowledge，如果有就退出并且给出提示，没有的话，会把探测结果存储到 logs/recon/app/页面名
+ - 然后 self-learning 的时候，指定目录logs/recon/app/页面名，就会最终提炼到页面名.md 存储到 @knowledge 目录上
