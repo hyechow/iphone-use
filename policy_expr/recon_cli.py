@@ -278,7 +278,7 @@ def main() -> None:
     elif args.paths:
         run_offline(args.paths)
     else:
-        run_online(debug=args.debug)
+        ap.print_help()
 
 
 if __name__ == "__main__":
