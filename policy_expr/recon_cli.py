@@ -31,10 +31,98 @@ from policy_expr.recon.bfs import probe_elements
 
 ROOT = Path(__file__).parent.parent
 LOG_ROOT = ROOT / "logs" / "recon"
+KNOWLEDGE_ROOT = ROOT / "knowledge"
 OFFLINE_EXPECTED_SIZE = (636, 1402)
 
 
-def run_online(*, debug: bool = False) -> None:
+def _parse_frontmatter(path: Path) -> dict[str, str]:
+    """Parse YAML frontmatter from a markdown file."""
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("---"):
+        return {}
+    end = text.find("---", 3)
+    if end < 0:
+        return {}
+    meta = {}
+    for line in text[3:end].strip().splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            meta[k.strip()] = v.strip()
+    return meta
+
+
+def _check_knowledge_exists(app: str, signature: str) -> Path | None:
+    """Check if a page with given signature already exists in knowledge.
+
+    Returns the matching .md path if found, None otherwise.
+    """
+    app_dir = KNOWLEDGE_ROOT / app
+    if not app_dir.is_dir():
+        return None
+
+    for md_path in sorted(app_dir.glob("*.md")):
+        meta = _parse_frontmatter(md_path)
+        if meta.get("signature") == signature:
+            return md_path
+    return None
+
+
+def run_app(app: str, *, debug: bool = False) -> None:
+    """Online recon for a specific app with knowledge dedup check."""
+    from policy_expr.perception import LivePhoneSession
+
+    print(f"应用侦察: {app}")
+
+    # Step 1: screenshot + parse identity
+    with LivePhoneSession() as phone:
+        png_bytes = phone.screenshot()
+
+        print("解析页面身份...")
+        knowledge = PageParser().analyze_screen(png_bytes)
+        ident = knowledge.page.identity
+        signature = ident.signature
+        # Derive stable page name from signature (2nd segment), not page_title
+        # signature format: "app/page_name/stable_features"
+        sig_parts = signature.split("/")
+        page_name = sig_parts[1] if len(sig_parts) >= 2 else ident.page_title
+
+        print(f"  应用: {ident.app_name}")
+        print(f"  页面: {page_name}")
+        print(f"  签名: {signature}")
+
+    # Step 2: check if already learned
+    existing = _check_knowledge_exists(app, signature)
+    if existing:
+        print(f"\n已学习过此页面: {existing}")
+        print(f"签名: {signature}")
+        return
+
+    print("新页面，开始探测...")
+
+    # Step 3: full recon
+    with LivePhoneSession() as phone:
+        out_dir = LOG_ROOT / app / page_name
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        img_path = out_dir / "initial.png"
+        img_path.write_bytes(png_bytes)
+        print(f"截图已保存: {img_path}")
+
+        viz_result(knowledge, png_bytes, "initial", out_dir)
+
+        result = probe_elements(
+            phone.client, knowledge, out_dir, img_path, phone.screenshot,
+            debug=debug,
+        )
+        result_path = out_dir / "recon_result.json"
+        result.save(result_path)
+
+        print(f"\n{'=' * 60}")
+        print(f"探测完成: {len(result.taps)} 个元素")
+        ok = sum(1 for t in result.taps if t.tap_ok)
+        print(f"  成功: {ok}  失败: {len(result.taps) - ok}")
+        print(f"  结果: {out_dir}")
+        print(f"{'=' * 60}")
     """Capture phone screen, parse, and probe each element."""
     from policy_expr.perception import LivePhoneSession
 
@@ -176,11 +264,14 @@ def main() -> None:
         help="图片文件或目录（留空则在线截图+探测）",
     )
     ap.add_argument("--debug", action="store_true", help="调试模式，每个元素暂停")
+    ap.add_argument("--app", type=str, metavar="NAME", help="在线侦察指定应用，自动去重")
     ap.add_argument("--learn", type=Path, metavar="JSON", help="从侦察结果生成功能流程描述")
     ap.add_argument("--knowledge", type=Path, metavar="DIR", help="从侦察目录构建页面操作知识库")
     args = ap.parse_args()
 
-    if args.learn:
+    if args.app:
+        run_app(args.app, debug=args.debug)
+    elif args.learn:
         run_learn(args.learn)
     elif args.knowledge:
         run_knowledge(args.knowledge)
