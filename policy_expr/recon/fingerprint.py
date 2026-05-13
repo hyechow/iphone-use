@@ -43,10 +43,11 @@ class PageFingerprint(BaseModel):
     top_bar: TopBar
     content_area: ContentArea
     bottom_bar: BottomBar
-    has_bottom_tabs: bool = Field(
-        description="底部是否有 tab 切换栏",
-    )
+    has_bottom_tabs: bool = Field(description="底部是否有 tab 切换栏")
     tab_count: int = Field(default=0, ge=0, le=10)
+    has_popup: bool = Field(default=False, description="是否有弹窗/对话框/权限请求/广告浮层覆盖在页面上")
+    dismiss_x: float = Field(default=-1, description="弹窗关闭按钮 x 坐标（0-1000），无则 -1")
+    dismiss_y: float = Field(default=-1, description="弹窗关闭按钮 y 坐标（0-1000），无则 -1")
 
     @property
     def key(self) -> str:
@@ -59,7 +60,7 @@ class PageFingerprint(BaseModel):
 # ── Prompt ─────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """\
-分析手机页面的布局骨架，忽略所有文字内容和动态信息。
+分析手机页面的布局骨架，忽略所有文字内容和动态信息。同时检测是否有弹窗覆盖页面。
 
 ## 顶部导航
 - none: 没有导航栏
@@ -87,6 +88,11 @@ SYSTEM_PROMPT = """\
 ## 判断底部 tab 栏的方法
 底部 tab 栏的特征：一排等宽的图标按钮，每个下方有文字标签，用于在几个主要页面间切换。
 数一下有几个 tab 图标，填入 tab_count。如果底部没有这种 tab 切换栏，has_bottom_tabs=false，tab_count=0。
+
+## 弹窗检测
+判断页面上是否有弹窗/对话框/权限请求/广告浮层覆盖在原页面上（有半透明遮罩或浮动框）。
+如果有，找到最合适的关闭/取消/跳过/拒绝按钮坐标（0-1000 坐标系，左上角原点）填入 dismiss_x/y。
+正常的页面跳转不算弹窗。
 """
 
 

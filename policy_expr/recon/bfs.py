@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from llm.structured import invoke_structured
 from policy_expr.config import resolve_llm_config
 from policy_expr.policies.base import resize_to_logical_png
+from policy_expr.recon.fingerprint import PageFingerprint
 from policy_expr.recon.page_parser import ParsedPage, PageKnowledge
 from policy_expr.recon.utils import (
     ReconResult,
@@ -45,6 +46,7 @@ class BackAction(BaseModel):
     back_y: float = Field(default=-1, description="返回目标归一化 y 坐标（0-1000）")
 
 
+
 BACK_PROMPT = """\
 你是一个手机页面导航分析器。
 
@@ -66,6 +68,7 @@ BACK_PROMPT = """\
 """
 
 
+
 def _is_navigation_target(el, has_nav: bool) -> bool:
     return el.element_type == "back_button" or (has_nav and el.element_type == "tab")
 
@@ -74,9 +77,10 @@ def _matches_initial_layered(
     initial_png: bytes,
     current_png: bytes | None,
     initial_fingerprint: str | None = None,
-) -> ScreenMatchDecision:
+) -> tuple[ScreenMatchDecision, PageFingerprint | None]:
+    """Returns (decision, current_fingerprint). Fingerprint is set when Level 2 runs."""
     if not current_png:
-        return ScreenMatchDecision(False, 0.0, "screenshot", "missing current screenshot")
+        return ScreenMatchDecision(False, 0.0, "screenshot", "missing current screenshot"), None
 
     # Level 1: pixel similarity (fast, free)
     similarity = png_similarity(initial_png, current_png)
@@ -86,17 +90,17 @@ def _matches_initial_layered(
             similarity,
             "pixel",
             f"similarity above back match threshold {BACK_MATCH_THRESHOLD}",
-        )
+        ), None
 
-    # Level 2: fingerprint comparison (one LLM call)
+    # Level 2: fingerprint comparison — also detects popups
     from policy_expr.recon.fingerprint import compute_fingerprint
 
     if initial_fingerprint is None:
         initial_fingerprint = compute_fingerprint(initial_png).key
-    current_fingerprint = compute_fingerprint(current_png).key
-    matched = initial_fingerprint == current_fingerprint
-    reason = f"fingerprint {'match' if matched else 'mismatch'}: [{current_fingerprint}]"
-    return ScreenMatchDecision(matched, similarity, "fingerprint", reason)
+    current_fp = compute_fingerprint(current_png)
+    matched = initial_fingerprint == current_fp.key
+    reason = f"fingerprint {'match' if matched else 'mismatch'}: [{current_fp.key}]"
+    return ScreenMatchDecision(matched, similarity, "fingerprint", reason), current_fp
 
 
 
@@ -227,7 +231,20 @@ def _tap_back_once(
             print(f"    ↩ {action_desc} → 父页面 {parent_sim:.3f}")
             return False, True, initial_fingerprint
 
-    decision = _matches_initial_layered(initial_page, initial_bytes, back_bytes, initial_fingerprint)
+    decision, current_fp = _matches_initial_layered(initial_page, initial_bytes, back_bytes, initial_fingerprint)
+
+    # If a popup is detected, dismiss it and re-check
+    if current_fp is not None and current_fp.has_popup and current_fp.dismiss_x >= 0:
+        from policy_expr.executor import logical_xy
+        lx, ly = logical_xy(current_fp.dismiss_x, current_fp.dismiss_y)
+        print(f"    检测到弹窗，关闭 ({lx:.0f},{ly:.0f})")
+        client.tap(lx, ly)
+        time.sleep(1.0)
+        back_bytes = screenshot()
+        if back_bytes:
+            back_path.write_bytes(back_bytes)
+        decision, _ = _matches_initial_layered(initial_page, initial_bytes, back_bytes, initial_fingerprint)
+
     status = f"✓ {decision.similarity:.3f}" if decision.matched else f"✗ {decision.similarity:.3f}"
     print(f"    ↩ {action_desc} → {status}")
     return bool(decision.matched), False, initial_fingerprint
@@ -404,7 +421,7 @@ def probe_elements(
     # Ensure we return to initial page after probing
     if initial_bytes:
         current_bytes = screenshot()
-        decision = _matches_initial_layered(page, initial_bytes, current_bytes, None)
+        decision, _ = _matches_initial_layered(page, initial_bytes, current_bytes, None)
         if not decision.matched:
             matched, _ = return_to_initial(
                 client, screenshot, page, initial_bytes,
