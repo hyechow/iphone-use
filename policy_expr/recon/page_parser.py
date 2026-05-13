@@ -360,12 +360,12 @@ class PageParser:
         boxes = det.detect_filtered(png_bytes, w, h)
 
         merged = enrich_with_icons(page, boxes, w, h)
-        print(f"  LLM: {len(page.interactive_elements)} 个 | "
-              f"YOLO: {len(boxes)} 个 | "
-              f"融合: {len(merged.interactive_elements)} 个")
+        # print(f"  LLM: {len(page.interactive_elements)} 个 | "
+        #       f"YOLO: {len(boxes)} 个 | "
+        #       f"融合: {len(merged.interactive_elements)} 个")
 
         areas = classify_elements(merged)
-        print(f"  区域数: {len(areas)}")
+        # print(f"  区域数: {len(areas)}")
 
         return PageKnowledge(
             page=merged,

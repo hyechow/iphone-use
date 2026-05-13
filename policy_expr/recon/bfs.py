@@ -151,7 +151,7 @@ def swipe_back(client) -> tuple[tuple[float, float], tuple[float, float], str]:
     return (start_x, start_y), (end_x, end_y), result
 
 
-BACK_MAX_RETRIES = len(BACK_TAP_POINTS) + 1
+BACK_MAX_RETRIES = len(BACK_TAP_POINTS)
 
 
 def infer_back_action(before_png: bytes, after_png: bytes | None) -> BackAction | None:
@@ -268,6 +268,7 @@ def return_to_initial(
             return True
         before_back_bytes = screenshot()
 
+    # LLM fallback: ask vision model for back action
     llm_action = infer_back_action(initial_bytes, clicked_page_bytes)
     if llm_action is not None:
         matched, fp = _tap_back_once(
@@ -289,13 +290,27 @@ def probe_elements(
     initial_screenshot_path: Path | None = None,
     screenshot: Callable[[], bytes] | None = None,
     debug: bool = False,
+    sample: int = 0,
+    parent_bytes: bytes | None = None,
+    re_nav: tuple[float, float] | None = None,
 ) -> ReconResult:
-    """Tap each area, capture after-state, return structured result."""
+    """Tap each area, capture after-state, return structured result.
+
+    Args:
+        sample: If > 0, randomly sample this many elements instead of probing all.
+        parent_bytes: If given, check if a tap navigated back to parent page.
+        re_nav: (lx, ly) to re-navigate from parent to child page when parent detected.
+    """
+    import random
     from policy_expr.executor import logical_xy
 
     page = knowledge.page
     areas = knowledge.areas
     has_nav = page.bottom_nav.has_nav
+
+    if sample > 0 and sample < len(areas):
+        areas = random.sample(areas, sample)
+        print(f"  [采样模式] 随机选取 {sample} 个元素")
 
     print(f"\n{'=' * 60}")
     print(f"点击探测: {len(areas)} 个可交互区域")
@@ -351,10 +366,34 @@ def probe_elements(
         ))
 
         if not is_tab:
+            # Check if tap navigated back to parent page
+            if parent_bytes and after_bytes:
+                from policy_expr.recon.utils import png_similarity
+                parent_sim = png_similarity(parent_bytes, after_bytes)
+                if parent_sim >= BACK_MATCH_THRESHOLD:
+                    if re_nav:
+                        print(f"    点击后回到父页面 (相似度 {parent_sim:.5f})，重新进入子页面")
+                        client.tap(re_nav[0], re_nav[1])
+                        time.sleep(2.0)
+                        continue
+                    else:
+                        print(f"    点击后回到父页面 (相似度 {parent_sim:.5f})，停止探测")
+                        break
+
             if initial_bytes and not return_to_initial(
                 client, screenshot, page, initial_bytes,
                 after_bytes, tap_dir, i, "area",
             ):
+                # return_to_initial failed — check if we're on parent page
+                if parent_bytes and re_nav:
+                    from policy_expr.recon.utils import png_similarity
+                    current_bytes = screenshot()
+                    parent_sim = png_similarity(parent_bytes, current_bytes)
+                    if parent_sim >= BACK_MATCH_THRESHOLD:
+                        print(f"    return 失败后检测到父页面 (相似度 {parent_sim:.5f})，重新进入子页面")
+                        client.tap(re_nav[0], re_nav[1])
+                        time.sleep(2.0)
+                        continue
                 print("    返回后未回到初始界面，停止探测")
                 break
 
@@ -362,5 +401,15 @@ def probe_elements(
 
         if debug:
             input("    [DEBUG] 按回车继续下一个区域...")
+
+    # Ensure we return to initial page after probing
+    if initial_bytes:
+        current_bytes = screenshot()
+        decision = _matches_initial_layered(page, initial_bytes, current_bytes, None)
+        if not decision.matched:
+            return_to_initial(
+                client, screenshot, page, initial_bytes,
+                current_bytes, tap_dir, 0, "final",
+            )
 
     return result

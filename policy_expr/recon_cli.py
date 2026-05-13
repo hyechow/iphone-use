@@ -74,14 +74,15 @@ def _parse_identity(phone) -> tuple:
     """Screenshot → parse page identity. Returns (png_bytes, knowledge, page_name)."""
     png_bytes = phone.screenshot()
 
-    print("\n解析页面身份...")
+    # print("\n解析页面身份...")
     knowledge = PageParser().analyze_screen(png_bytes)
     page_name = _derive_page_name(knowledge.page.identity.signature)
-    print(f"  页面: {page_name}  签名: {knowledge.page.identity.signature}")
+    # print(f"  页面: {page_name}  签名: {knowledge.page.identity.signature}")
     return png_bytes, knowledge, page_name
 
 
-def _probe_page(phone, knowledge, png_bytes, out_dir: Path):
+def _probe_page(phone, knowledge, png_bytes, out_dir: Path, sample: int = 0,
+                parent_bytes: bytes | None = None, re_nav: tuple[float, float] | None = None):
     """Save initial screenshot + probe all elements. Returns (result, out_dir)."""
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -89,7 +90,8 @@ def _probe_page(phone, knowledge, png_bytes, out_dir: Path):
     img_path.write_bytes(png_bytes)
     viz_result(knowledge, png_bytes, "initial", out_dir)
 
-    result = probe_elements(phone.client, knowledge, out_dir, img_path, phone.screenshot)
+    result = probe_elements(phone.client, knowledge, out_dir, img_path, phone.screenshot,
+                            sample=sample, parent_bytes=parent_bytes, re_nav=re_nav)
     result.save(out_dir / "recon_result.json")
 
     ok = sum(1 for t in result.taps if t.tap_ok)
@@ -100,41 +102,82 @@ def _probe_page(phone, knowledge, png_bytes, out_dir: Path):
 
 # ── Commands ─────────────────────────────────────────────
 
-def run_app(app: str, depth: int = 0) -> None:
+def run_app(app: str, depth: int = 0, sample: int = 0) -> None:
     """Online recon with BFS depth control.
 
     depth=0: explore current page only.
     depth=N: BFS explore discovered target pages (up to N levels deep).
+
+    Queue stores navigation chains: each item is (depth, nav_chain) where
+    nav_chain is a list of (lx, ly, label) taps from root to target page.
     """
     import time
     from collections import deque
 
     from policy_expr.perception import LivePhoneSession
 
-    print(f"应用侦察: {app} (depth={depth})")
+    print(f"应用侦察: {app} (depth={depth}, sample={sample})")
 
     with LivePhoneSession() as phone:
-        queue: deque[tuple[int,]] = deque([(depth,)])
+        # nav_chain: taps from root to target, [] = root page
+        queue: deque[tuple[int, list]] = deque([(depth, [])])
+        root_ctx = None  # (page, initial_bytes, out_dir) for return_to_initial
 
         while queue:
-            cur_depth, = queue.popleft()
+            cur_depth, nav_chain = queue.popleft()
 
+            # Return to root then navigate to target
+            if root_ctx and nav_chain:
+                root_page, root_bytes, root_out = root_ctx
+                ok = return_to_initial(
+                    phone.client, phone.screenshot,
+                    root_page, root_bytes,
+                    None, root_out / "tap", 0, "back",
+                )
+                if not ok:
+                    print(f"\n  \033[31m✗ 返回根页面失败，跳过: {[l for _, _, l in nav_chain]}\033[0m")
+                    continue
+                root_title = root_page.identity.page_title
+                path_desc = " → ".join([root_title] + [l for _, _, l in nav_chain])
+                print(f"\n\033[36m━━━ 页面跳转: {path_desc} ━━━\033[0m")
+                for lx, ly, label in nav_chain:
+                    phone.client.tap(lx, ly)
+                    time.sleep(2.0)
+
+            # Explore current page
             png_bytes, knowledge, page_name = _parse_identity(phone)
             signature = knowledge.page.identity.signature
 
-            # Dedup
-            existing = _check_knowledge_exists(app, signature)
-            if existing:
-                print(f"  已学习过，跳过: {existing}")
+            already_learned = _check_knowledge_exists(app, signature)
+            if already_learned and cur_depth <= 0:
+                print(f"  已学习过，跳过: {already_learned}")
                 continue
 
-            result, out_dir = _probe_page(phone, knowledge, png_bytes, LOG_ROOT / app / page_name)
+            parent_bytes = root_ctx[1] if root_ctx else None
+            re_nav = nav_chain[-1][:2] if nav_chain else None
+            result, out_dir = _probe_page(phone, knowledge, png_bytes, LOG_ROOT / app / page_name,
+                                          sample=sample, parent_bytes=parent_bytes, re_nav=re_nav)
+            
+            # TODO: For deeper BFS, we may want to learn/knowledge after each page to improve return_to_initial success. But it slows down the process and may cause more API costs, so we can enable it later if needed.
+            # if not already_learned:
+            #     run_learn(out_dir / "recon_result.json")
+            #     run_knowledge(out_dir)
 
-            # Learn + Knowledge
-            run_learn(out_dir / "recon_result.json")
-            run_knowledge(out_dir)
+            # Save root context for returning
+            if root_ctx is None:
+                root_ctx = (knowledge.page, (out_dir / "initial.png").read_bytes(), out_dir)
 
-            # Enqueue navigable target pages
+            # Enqueue children
+            if cur_depth <= 0:
+                continue
+
+            n_children = sum(1 for t in result.taps if t.tap_ok)
+            if n_children:
+                input(f"  发现 {n_children} 个可导航子页面，按回车继续探索...")
+            if root_ctx is None:
+                root_ctx = (knowledge.page, (out_dir / "initial.png").read_bytes(), out_dir)
+
+            # Enqueue children
             if cur_depth <= 0:
                 continue
 
@@ -143,18 +186,7 @@ def run_app(app: str, depth: int = 0) -> None:
                     continue
 
                 lx, ly = logical_xy(tap.x, tap.y)
-                print(f"\n  → 深度 {cur_depth}: 点击「{tap.label}」({lx:.0f},{ly:.0f})")
-                phone.client.tap(lx, ly)
-                time.sleep(2.0)
-
-                queue.append((cur_depth - 1,))
-
-                print(f"  ← 返回: 回到「{page_name}」")
-                return_to_initial(
-                    phone.client, phone.screenshot,
-                    knowledge.page, (out_dir / "initial.png").read_bytes(),
-                    None, out_dir / "tap", 0, "back",
-                )
+                queue.append((cur_depth - 1, nav_chain + [(lx, ly, tap.label)]))
 
 
 def run_parse(paths: list[Path]) -> None:
@@ -239,13 +271,14 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="App Recon: 页面结构分析与自学习")
     ap.add_argument("--app", type=str, metavar="NAME", help="在线侦察指定应用，自动完成 recon→learn→knowledge")
     ap.add_argument("--depth", type=int, default=0, metavar="N", help="BFS 探索深度，0=仅当前页面 (默认)")
+    ap.add_argument("--sample", type=int, default=0, metavar="N", help="每个页面随机采样 N 个元素探测，0=全部 (默认)")
     ap.add_argument("--debug-parse", nargs="*", type=Path, metavar="PATH", help="[调试] 解析图片，无参数则在线截图")
     ap.add_argument("--debug-learn", type=Path, metavar="JSON", help="[调试] 从侦察结果生成功能流程描述")
     ap.add_argument("--debug-knowledge", type=Path, metavar="DIR", help="[调试] 从侦察目录构建页面操作知识库")
     args = ap.parse_args()
 
     if args.app:
-        run_app(args.app, depth=args.depth)
+        run_app(args.app, depth=args.depth, sample=args.sample)
     elif args.debug_learn:
         run_learn(args.debug_learn)
     elif args.debug_knowledge:

@@ -265,13 +265,13 @@ def visualize_areas(
 def print_areas(knowledge: "PageKnowledge") -> None:  # noqa: F821
     """Print areas to stdout."""
     ident = knowledge.page.identity
-    print(f"  应用 : {ident.app_name}")
-    print(f"  页面 : {ident.page_title}")
-    print(f"  指纹 : {ident.signature}")
-    print(f"  区域数 : {len(knowledge.areas)}")
-    for i, a in enumerate(knowledge.areas, 1):
-        print(f"    [{i:2d}] ({a.center_xy[0]:5.0f},{a.center_xy[1]:5.0f})  "
-              f"「{a.label}」→ {a.target_page}")
+    # print(f"  应用 : {ident.app_name}")
+    # print(f"  页面 : {ident.page_title}")
+    # print(f"  指纹 : {ident.signature}")
+    # print(f"  区域数 : {len(knowledge.areas)}")
+    # for i, a in enumerate(knowledge.areas, 1):
+    #     print(f"    [{i:2d}] ({a.center_xy[0]:5.0f},{a.center_xy[1]:5.0f})  "
+    #           f"「{a.label}」→ {a.target_page}")
 
 
 def viz_result(
@@ -294,7 +294,7 @@ def viz_result(
     if knowledge.llm_page:
         llm_viz_path = out_dir / f"{stem}_llm_viz.png"
         llm_viz_path.write_bytes(visualize(knowledge.llm_page, png_bytes))
-        print(f"  LLM 可视化 : {llm_viz_path}")
+        # print(f"  LLM 可视化 : {llm_viz_path}")
 
     # YOLO-only visualization
     if knowledge.yolo_boxes and knowledge.img_size:
@@ -303,11 +303,11 @@ def viz_result(
             png_bytes, knowledge.yolo_boxes,
             knowledge.img_size[0], knowledge.img_size[1],
         ))
-        print(f"  YOLO 可视化 : {yolo_viz_path}")
+        # print(f"  YOLO 可视化 : {yolo_viz_path}")
 
     # Area visualization
     areas_viz_path = out_dir / f"{stem}_areas_viz.png"
     areas_viz_path.write_bytes(visualize_areas(png_bytes, knowledge.areas))
 
-    print(f"  JSON : {json_path}")
-    print(f"  区域可视化 : {areas_viz_path}")
+    # print(f"  JSON : {json_path}")
+    # print(f"  区域可视化 : {areas_viz_path}")
