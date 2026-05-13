@@ -15,12 +15,12 @@ from pydantic import BaseModel, Field
 from llm.structured import invoke_structured
 from policy_expr.config import resolve_llm_config
 from policy_expr.policies.base import resize_to_logical_png
-from policy_expr.recon.page_parser import ParsedPage, PageKnowledge
+from policy_expr.perception import try_resume_mac
+from policy_expr.recon.page_parser import PageKnowledge
 from policy_expr.recon.utils import (
     ReconResult,
     ScreenMatchDecision,
     TapResult,
-    SCREEN_MATCH_THRESHOLD,
     png_similarity,
 )
 
@@ -46,53 +46,31 @@ class BackAction(BaseModel):
 
 
 
-class PopupState(BaseModel):
-    has_popup: bool = Field(description="是否有弹窗/对话框/权限请求/广告浮层覆盖在页面上")
-    dismiss_x: float = Field(default=-1, description="关闭按钮 x 坐标（0-1000），找不到则 -1")
-    dismiss_y: float = Field(default=-1, description="关闭按钮 y 坐标（0-1000），找不到则 -1")
-
-
-POPUP_PROMPT = """\
-判断当前截图中是否有弹窗、对话框、权限请求、广告浮层等覆盖在页面上。
-
-弹窗的判断依据：
-- 有半透明遮罩层压在背景页面上
-- 浮动框/卡片没有占满整个屏幕
-- 存在明确的关闭/取消/跳过/拒绝/我知道了等按钮
-
-不算弹窗：整个页面都是新内容（正常页面跳转）。
-
-如果有弹窗，输出最合适的关闭按钮坐标（0-1000 坐标系，左上角原点）。
-"""
-
 
 BACK_PROMPT = """\
 你是一个手机页面导航分析器。
 
 用户给出了两张截图：
 - 第一张（BEFORE）：点击前的原始页面
-- 第二张（AFTER）：点击某个元素后跳转到的页面
+- 第二张（AFTER）：点击某个元素后的页面
 
-请分析 AFTER 页面上有什么方法可以返回到 BEFORE 页面。
+目标：找到一个点击动作，使 AFTER 页面更接近 BEFORE 页面。
 
-常见的返回方式：
-1. 左上角返回按钮（< 箭头）→ 点击它
-2. 底部 tab 栏中的某个 tab → 点击对应 tab
-3. 关闭按钮（×）→ 点击它
+处理优先级：
+1. 如果 AFTER 有弹窗/对话框/广告浮层覆盖页面 → 点击关闭/取消/跳过/拒绝按钮关掉弹窗
+2. 如果 AFTER 是正常跳转的新页面 → 点击左上角返回按钮、底部 tab、或关闭按钮（×）
+
+每次只输出一个动作（先处理弹窗，弹窗没了再考虑页面导航）。
 
 输出：
-- can_go_back: 是否能找到返回方法
-- method: 描述返回方法
-- back_x, back_y: 返回目标坐标（0-1000，左上角原点）
+- can_go_back: 是否找到可点击的目标
+- method: 描述这次点击的作用
+- back_x, back_y: 目标坐标（0-1000，左上角原点）
 """
 
 
 
-def _is_navigation_target(el, has_nav: bool) -> bool:
-    return el.element_type == "back_button" or (has_nav and el.element_type == "tab")
-
 def _matches_initial_layered(
-    initial_page: ParsedPage,
     initial_png: bytes,
     current_png: bytes | None,
     initial_fingerprint: str | None = None,
@@ -166,33 +144,6 @@ def swipe_back(client) -> tuple[tuple[float, float], tuple[float, float], str]:
 BACK_MAX_RETRIES = len(BACK_TAP_POINTS)
 
 
-def dismiss_popup(client, screenshot_fn: Callable[[], bytes], png_bytes: bytes) -> bytes:
-    """Detect and dismiss popup if present. Returns updated screenshot."""
-    from policy_expr.executor import logical_xy
-
-    cfg = resolve_llm_config("action_policy")
-    llm = ChatOpenAI(model=cfg.model, api_key=cfg.api_key, base_url=cfg.base_url, temperature=0)
-    b64 = base64.b64encode(resize_to_logical_png(png_bytes)).decode()
-    messages = [
-        SystemMessage(content=POPUP_PROMPT),
-        HumanMessage(content=[
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-        ]),
-    ]
-    state = invoke_structured(llm, messages, PopupState)
-    if not state.has_popup:
-        return png_bytes
-
-    if state.dismiss_x < 0 or state.dismiss_y < 0:
-        print(f"    检测到弹窗，未找到关闭按钮")
-        return png_bytes
-
-    lx, ly = logical_xy(state.dismiss_x, state.dismiss_y)
-    print(f"    检测到弹窗，关闭 ({lx:.0f},{ly:.0f})")
-    client.tap(lx, ly)
-    time.sleep(1.0)
-    return screenshot_fn() or png_bytes
-
 
 def infer_back_action(before_png: bytes, after_png: bytes | None) -> BackAction | None:
     """Ask the vision model how to navigate from AFTER back to BEFORE."""
@@ -235,7 +186,6 @@ def infer_back_action(before_png: bytes, after_png: bytes | None) -> BackAction 
 def _tap_back_once(
     client,
     screenshot: Callable[[], bytes],
-    initial_page: ParsedPage,
     initial_bytes: bytes,
     before_back_bytes: bytes | None,
     tap_dir: Path,
@@ -277,7 +227,7 @@ def _tap_back_once(
             print(f"    ↩ {action_desc} → 父页面 {parent_sim:.3f}")
             return False, True, initial_fingerprint
 
-    decision = _matches_initial_layered(initial_page, initial_bytes, back_bytes, initial_fingerprint)
+    decision = _matches_initial_layered(initial_bytes, back_bytes, initial_fingerprint)
     status = f"✓ {decision.similarity:.3f}" if decision.matched else f"✗ {decision.similarity:.3f}"
     print(f"    ↩ {action_desc} → {status}")
     return bool(decision.matched), False, initial_fingerprint
@@ -286,7 +236,6 @@ def _tap_back_once(
 def return_to_initial(
     client,
     screenshot: Callable[[], bytes],
-    initial_page: ParsedPage,
     initial_bytes: bytes,
     before_back_bytes: bytes | None,
     tap_dir: Path,
@@ -304,7 +253,7 @@ def return_to_initial(
 
     for attempt in range(1, BACK_MAX_RETRIES + 1):
         matched, on_parent, fp = _tap_back_once(
-            client, screenshot, initial_page, initial_bytes,
+            client, screenshot, initial_bytes,
             before_back_bytes, tap_dir, index, element_type, fp, attempt,
             parent_bytes=parent_bytes,
         )
@@ -318,7 +267,7 @@ def return_to_initial(
     llm_action = infer_back_action(initial_bytes, clicked_page_bytes)
     if llm_action is not None:
         matched, on_parent, fp = _tap_back_once(
-            client, screenshot, initial_page, initial_bytes,
+            client, screenshot, initial_bytes,
             before_back_bytes, tap_dir, index, element_type, fp, 0,
             llm_back_action=llm_action, parent_bytes=parent_bytes,
         )
@@ -392,6 +341,16 @@ def probe_elements(
         print(f"\n  [{i}/{len(areas)}] 「{area.label}」 @ ({ax:.0f},{ay:.0f}) → ({lx:.0f},{ly:.0f})")
 
         tap_response = client.tap(lx, ly)
+        if "paused" in tap_response.lower():
+            print(f"    Mac 弹窗阻断，关闭后跳过")
+            try_resume_mac()
+            result.taps.append(TapResult(
+                index=i, element_type="tab" if is_tab else "area",
+                label=area.label, x=ax, y=ay,
+                tap_ok=True, screenshot_path="", navigated=False,
+            ))
+            result.save(result_path)
+            continue
         tap_ok = "failed" not in tap_response.lower() and "interrupted" not in tap_response.lower()
         print(f"    结果: {tap_response}")
         time.sleep(2.0)
@@ -408,12 +367,7 @@ def probe_elements(
             if sim >= BACK_ACTION_NO_CHANGE_THRESHOLD:
                 print(f"    页面未变化 (相似度 {sim:.3f})，跳过")
             else:
-                # Screen changed — check for popup before anything else
-                after_bytes = dismiss_popup(client, screenshot, after_bytes)
-                sim2 = png_similarity(initial_bytes, after_bytes)
-                # Use BACK_MATCH_THRESHOLD: if sim2 >= 0.989, popup was on
-                # the initial page and dismissing it brought us back — no return needed.
-                navigated = sim2 < BACK_MATCH_THRESHOLD
+                navigated = True
 
         result.taps.append(TapResult(
             index=i,
@@ -434,7 +388,7 @@ def probe_elements(
             )
             if not on_parent and initial_bytes:
                 matched, on_parent = return_to_initial(
-                    client, screenshot, page, initial_bytes,
+                    client, screenshot, initial_bytes,
                     after_bytes, tap_dir, i, "area",
                     parent_bytes=parent_bytes,
                 )
@@ -459,10 +413,10 @@ def probe_elements(
     # Ensure we return to initial page after probing
     if initial_bytes:
         current_bytes = screenshot()
-        decision = _matches_initial_layered(page, initial_bytes, current_bytes, None)
+        decision = _matches_initial_layered(initial_bytes, current_bytes, None)
         if not decision.matched:
             matched, _ = return_to_initial(
-                client, screenshot, page, initial_bytes,
+                client, screenshot, initial_bytes,
                 current_bytes, tap_dir, 0, "final",
             )
             if not matched:

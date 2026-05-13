@@ -131,7 +131,7 @@ def run_app(app: str, depth: int = 0, sample: int = 0) -> None:
                 root_page, root_bytes, root_out = root_ctx
                 ok, _ = return_to_initial(
                     phone.client, phone.screenshot,
-                    root_page, root_bytes,
+                    root_bytes,
                     None, root_out / "tap", 0, "back",
                 )
                 if not ok:
