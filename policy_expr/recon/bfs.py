@@ -194,8 +194,9 @@ def _tap_back_once(
     initial_fingerprint: str | None,
     attempt: int,
     llm_back_action: BackAction | None = None,
-) -> tuple[bool, str | None]:
-    """One attempt to go back. Returns (matched, fingerprint)."""
+    parent_bytes: bytes | None = None,
+) -> tuple[bool, bool, str | None]:
+    """One attempt to go back. Returns (matched_initial, on_parent, fingerprint)."""
 
     if llm_back_action is not None:
         lx, ly, _ = tap_llm_back(client, llm_back_action)
@@ -217,12 +218,19 @@ def _tap_back_once(
         action_similarity = png_similarity(before_back_bytes, back_bytes)
         if action_similarity >= BACK_ACTION_NO_CHANGE_THRESHOLD:
             print(f"    ↩ {action_desc} → 未变化")
-            return False, initial_fingerprint
+            return False, False, initial_fingerprint
+
+    # Check parent page first (cheap pixel comparison)
+    if parent_bytes and back_bytes:
+        parent_sim = png_similarity(parent_bytes, back_bytes)
+        if parent_sim >= BACK_MATCH_THRESHOLD:
+            print(f"    ↩ {action_desc} → 父页面 {parent_sim:.3f}")
+            return False, True, initial_fingerprint
 
     decision = _matches_initial_layered(initial_page, initial_bytes, back_bytes, initial_fingerprint)
     status = f"✓ {decision.similarity:.3f}" if decision.matched else f"✗ {decision.similarity:.3f}"
     print(f"    ↩ {action_desc} → {status}")
-    return bool(decision.matched), initial_fingerprint
+    return bool(decision.matched), False, initial_fingerprint
 
 
 def return_to_initial(
@@ -235,33 +243,42 @@ def return_to_initial(
     index: int,
     element_type: str,
     initial_fingerprint: str | None = None,
-) -> bool:
-    """Navigate back to the initial page, retrying up to BACK_MAX_RETRIES times."""
+    parent_bytes: bytes | None = None,
+) -> tuple[bool, bool]:
+    """Navigate back to the initial page, retrying up to BACK_MAX_RETRIES times.
+
+    Returns (matched_initial, on_parent).
+    """
     fp = initial_fingerprint
     clicked_page_bytes = before_back_bytes
 
     for attempt in range(1, BACK_MAX_RETRIES + 1):
-        matched, fp = _tap_back_once(
+        matched, on_parent, fp = _tap_back_once(
             client, screenshot, initial_page, initial_bytes,
             before_back_bytes, tap_dir, index, element_type, fp, attempt,
+            parent_bytes=parent_bytes,
         )
         if matched:
-            return True
+            return True, False
+        if on_parent:
+            return False, True
         before_back_bytes = screenshot()
 
     # LLM fallback: ask vision model for back action
     llm_action = infer_back_action(initial_bytes, clicked_page_bytes)
     if llm_action is not None:
-        matched, fp = _tap_back_once(
+        matched, on_parent, fp = _tap_back_once(
             client, screenshot, initial_page, initial_bytes,
             before_back_bytes, tap_dir, index, element_type, fp, 0,
-            llm_back_action=llm_action,
+            llm_back_action=llm_action, parent_bytes=parent_bytes,
         )
         if matched:
-            return True
+            return True, False
+        if on_parent:
+            return False, True
 
     print(f"    {BACK_MAX_RETRIES} 次返回尝试后仍未回到初始页面")
-    return False
+    return False, False
 
 
 def probe_elements(
@@ -347,35 +364,27 @@ def probe_elements(
         ))
 
         if not is_tab:
-            # Check if tap navigated back to parent page
-            if parent_bytes and after_bytes:
-                from policy_expr.recon.utils import png_similarity
-                parent_sim = png_similarity(parent_bytes, after_bytes)
-                if parent_sim >= BACK_MATCH_THRESHOLD:
-                    if re_nav:
-                        print(f"    点击后回到父页面 (相似度 {parent_sim:.5f})，重新进入子页面")
-                        client.tap(re_nav[0], re_nav[1])
-                        time.sleep(2.0)
-                        continue
-                    else:
-                        print(f"    点击后回到父页面 (相似度 {parent_sim:.5f})，停止探测")
-                        break
+            # Fast parent check on the immediate tap result (before any back attempts)
+            on_parent = bool(
+                parent_bytes and after_bytes
+                and png_similarity(parent_bytes, after_bytes) >= BACK_MATCH_THRESHOLD
+            )
+            if not on_parent and initial_bytes:
+                matched, on_parent = return_to_initial(
+                    client, screenshot, page, initial_bytes,
+                    after_bytes, tap_dir, i, "area",
+                    parent_bytes=parent_bytes,
+                )
+                if not matched and not on_parent:
+                    print("    返回后未回到初始界面，停止探测")
+                    break
 
-            if initial_bytes and not return_to_initial(
-                client, screenshot, page, initial_bytes,
-                after_bytes, tap_dir, i, "area",
-            ):
-                # return_to_initial failed — check if we're on parent page
-                if parent_bytes and re_nav:
-                    from policy_expr.recon.utils import png_similarity
-                    current_bytes = screenshot()
-                    parent_sim = png_similarity(parent_bytes, current_bytes)
-                    if parent_sim >= BACK_MATCH_THRESHOLD:
-                        print(f"    return 失败后检测到父页面 (相似度 {parent_sim:.5f})，重新进入子页面")
-                        client.tap(re_nav[0], re_nav[1])
-                        time.sleep(2.0)
-                        continue
-                print("    返回后未回到初始界面，停止探测")
+            if on_parent:
+                if re_nav:
+                    print(f"    落入父页面，重新进入子页面")
+                    client.tap(re_nav[0], re_nav[1])
+                    time.sleep(2.0)
+                    continue
                 break
 
         result.save(result_path)
