@@ -15,7 +15,6 @@ from pydantic import BaseModel, Field
 from llm.structured import invoke_structured
 from policy_expr.config import resolve_llm_config
 from policy_expr.policies.base import resize_to_logical_png
-from policy_expr.recon.fingerprint import PageFingerprint
 from policy_expr.recon.page_parser import ParsedPage, PageKnowledge
 from policy_expr.recon.utils import (
     ReconResult,
@@ -45,6 +44,26 @@ class BackAction(BaseModel):
     back_x: float = Field(default=-1, description="返回目标归一化 x 坐标（0-1000）")
     back_y: float = Field(default=-1, description="返回目标归一化 y 坐标（0-1000）")
 
+
+
+class PopupState(BaseModel):
+    has_popup: bool = Field(description="是否有弹窗/对话框/权限请求/广告浮层覆盖在页面上")
+    dismiss_x: float = Field(default=-1, description="关闭按钮 x 坐标（0-1000），找不到则 -1")
+    dismiss_y: float = Field(default=-1, description="关闭按钮 y 坐标（0-1000），找不到则 -1")
+
+
+POPUP_PROMPT = """\
+判断当前截图中是否有弹窗、对话框、权限请求、广告浮层等覆盖在页面上。
+
+弹窗的判断依据：
+- 有半透明遮罩层压在背景页面上
+- 浮动框/卡片没有占满整个屏幕
+- 存在明确的关闭/取消/跳过/拒绝/我知道了等按钮
+
+不算弹窗：整个页面都是新内容（正常页面跳转）。
+
+如果有弹窗，输出最合适的关闭按钮坐标（0-1000 坐标系，左上角原点）。
+"""
 
 
 BACK_PROMPT = """\
@@ -77,10 +96,9 @@ def _matches_initial_layered(
     initial_png: bytes,
     current_png: bytes | None,
     initial_fingerprint: str | None = None,
-) -> tuple[ScreenMatchDecision, PageFingerprint | None]:
-    """Returns (decision, current_fingerprint). Fingerprint is set when Level 2 runs."""
+) -> ScreenMatchDecision:
     if not current_png:
-        return ScreenMatchDecision(False, 0.0, "screenshot", "missing current screenshot"), None
+        return ScreenMatchDecision(False, 0.0, "screenshot", "missing current screenshot")
 
     # Level 1: pixel similarity (fast, free)
     similarity = png_similarity(initial_png, current_png)
@@ -90,17 +108,17 @@ def _matches_initial_layered(
             similarity,
             "pixel",
             f"similarity above back match threshold {BACK_MATCH_THRESHOLD}",
-        ), None
+        )
 
-    # Level 2: fingerprint comparison — also detects popups
+    # Level 2: fingerprint comparison (one LLM call)
     from policy_expr.recon.fingerprint import compute_fingerprint
 
     if initial_fingerprint is None:
         initial_fingerprint = compute_fingerprint(initial_png).key
-    current_fp = compute_fingerprint(current_png)
-    matched = initial_fingerprint == current_fp.key
-    reason = f"fingerprint {'match' if matched else 'mismatch'}: [{current_fp.key}]"
-    return ScreenMatchDecision(matched, similarity, "fingerprint", reason), current_fp
+    current_fingerprint = compute_fingerprint(current_png).key
+    matched = initial_fingerprint == current_fingerprint
+    reason = f"fingerprint {'match' if matched else 'mismatch'}: [{current_fingerprint}]"
+    return ScreenMatchDecision(matched, similarity, "fingerprint", reason)
 
 
 
@@ -146,6 +164,34 @@ def swipe_back(client) -> tuple[tuple[float, float], tuple[float, float], str]:
 
 
 BACK_MAX_RETRIES = len(BACK_TAP_POINTS)
+
+
+def dismiss_popup(client, screenshot_fn: Callable[[], bytes], png_bytes: bytes) -> bytes:
+    """Detect and dismiss popup if present. Returns updated screenshot."""
+    from policy_expr.executor import logical_xy
+
+    cfg = resolve_llm_config("action_policy")
+    llm = ChatOpenAI(model=cfg.model, api_key=cfg.api_key, base_url=cfg.base_url, temperature=0)
+    b64 = base64.b64encode(resize_to_logical_png(png_bytes)).decode()
+    messages = [
+        SystemMessage(content=POPUP_PROMPT),
+        HumanMessage(content=[
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+        ]),
+    ]
+    state = invoke_structured(llm, messages, PopupState)
+    if not state.has_popup:
+        return png_bytes
+
+    if state.dismiss_x < 0 or state.dismiss_y < 0:
+        print(f"    检测到弹窗，未找到关闭按钮")
+        return png_bytes
+
+    lx, ly = logical_xy(state.dismiss_x, state.dismiss_y)
+    print(f"    检测到弹窗，关闭 ({lx:.0f},{ly:.0f})")
+    client.tap(lx, ly)
+    time.sleep(1.0)
+    return screenshot_fn() or png_bytes
 
 
 def infer_back_action(before_png: bytes, after_png: bytes | None) -> BackAction | None:
@@ -231,20 +277,7 @@ def _tap_back_once(
             print(f"    ↩ {action_desc} → 父页面 {parent_sim:.3f}")
             return False, True, initial_fingerprint
 
-    decision, current_fp = _matches_initial_layered(initial_page, initial_bytes, back_bytes, initial_fingerprint)
-
-    # If a popup is detected, dismiss it and re-check
-    if current_fp is not None and current_fp.has_popup and current_fp.dismiss_x >= 0:
-        from policy_expr.executor import logical_xy
-        lx, ly = logical_xy(current_fp.dismiss_x, current_fp.dismiss_y)
-        print(f"    检测到弹窗，关闭 ({lx:.0f},{ly:.0f})")
-        client.tap(lx, ly)
-        time.sleep(1.0)
-        back_bytes = screenshot()
-        if back_bytes:
-            back_path.write_bytes(back_bytes)
-        decision, _ = _matches_initial_layered(initial_page, initial_bytes, back_bytes, initial_fingerprint)
-
+    decision = _matches_initial_layered(initial_page, initial_bytes, back_bytes, initial_fingerprint)
     status = f"✓ {decision.similarity:.3f}" if decision.matched else f"✗ {decision.similarity:.3f}"
     print(f"    ↩ {action_desc} → {status}")
     return bool(decision.matched), False, initial_fingerprint
@@ -375,7 +408,10 @@ def probe_elements(
             if sim >= BACK_ACTION_NO_CHANGE_THRESHOLD:
                 print(f"    页面未变化 (相似度 {sim:.3f})，跳过")
             else:
-                navigated = True
+                # Screen changed — check for popup before anything else
+                after_bytes = dismiss_popup(client, screenshot, after_bytes)
+                sim2 = png_similarity(initial_bytes, after_bytes)
+                navigated = sim2 < BACK_ACTION_NO_CHANGE_THRESHOLD
 
         result.taps.append(TapResult(
             index=i,
@@ -421,7 +457,7 @@ def probe_elements(
     # Ensure we return to initial page after probing
     if initial_bytes:
         current_bytes = screenshot()
-        decision, _ = _matches_initial_layered(page, initial_bytes, current_bytes, None)
+        decision = _matches_initial_layered(page, initial_bytes, current_bytes, None)
         if not decision.matched:
             matched, _ = return_to_initial(
                 client, screenshot, page, initial_bytes,
