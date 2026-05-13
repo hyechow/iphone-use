@@ -11,3 +11,5 @@ tmp_scripts/
 knowledge/*.png
 models/
 knowledge/**/*.md
+!knowledge/pinduoduo.md
+!knowledge/*.md
