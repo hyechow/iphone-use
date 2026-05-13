@@ -182,7 +182,7 @@ def run_app(app: str, depth: int = 0, sample: int = 0) -> None:
                 continue
 
             for tap in result.taps:
-                if not tap.tap_ok:
+                if not tap.tap_ok or not tap.navigated:
                     continue
 
                 lx, ly = logical_xy(tap.x, tap.y)

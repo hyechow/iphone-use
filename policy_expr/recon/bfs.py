@@ -352,6 +352,14 @@ def probe_elements(
             after_path.write_bytes(after_bytes)
             print(f"    截图: {after_path}")
 
+        navigated = False
+        if not is_tab and after_bytes and initial_bytes:
+            sim = png_similarity(initial_bytes, after_bytes)
+            if sim >= BACK_ACTION_NO_CHANGE_THRESHOLD:
+                print(f"    页面未变化 (相似度 {sim:.3f})，跳过")
+            else:
+                navigated = True
+
         result.taps.append(TapResult(
             index=i,
             element_type="tab" if is_tab else "area",
@@ -360,10 +368,10 @@ def probe_elements(
             y=ay,
             tap_ok=tap_ok,
             screenshot_path=str(after_path),
-            navigated=not is_tab,
+            navigated=navigated,
         ))
 
-        if not is_tab:
+        if not is_tab and navigated:
             # Fast parent check on the immediate tap result (before any back attempts)
             on_parent = bool(
                 parent_bytes and after_bytes
