@@ -411,7 +411,9 @@ def probe_elements(
                 # Screen changed — check for popup before anything else
                 after_bytes = dismiss_popup(client, screenshot, after_bytes)
                 sim2 = png_similarity(initial_bytes, after_bytes)
-                navigated = sim2 < BACK_ACTION_NO_CHANGE_THRESHOLD
+                # Use BACK_MATCH_THRESHOLD: if sim2 >= 0.989, popup was on
+                # the initial page and dismissing it brought us back — no return needed.
+                navigated = sim2 < BACK_MATCH_THRESHOLD
 
         result.taps.append(TapResult(
             index=i,
