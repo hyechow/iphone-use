@@ -384,8 +384,9 @@ def probe_elements(
                     parent_bytes=parent_bytes,
                 )
                 if not matched and not on_parent:
-                    print("    返回后未回到初始界面，停止探测")
-                    break
+                    raise RuntimeError(
+                        f"无法返回子页面（探测第 {i} 个元素「{area.label}」后），终止探测"
+                    )
 
             if on_parent:
                 if re_nav:
@@ -405,9 +406,11 @@ def probe_elements(
         current_bytes = screenshot()
         decision = _matches_initial_layered(page, initial_bytes, current_bytes, None)
         if not decision.matched:
-            return_to_initial(
+            matched, _ = return_to_initial(
                 client, screenshot, page, initial_bytes,
                 current_bytes, tap_dir, 0, "final",
             )
+            if not matched:
+                raise RuntimeError("探测完成后无法返回初始页面，终止")
 
     return result
