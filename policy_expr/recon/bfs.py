@@ -89,10 +89,6 @@ def _matches_initial_layered(
         )
 
     # Level 2: fingerprint comparison (one LLM call)
-    print(
-        f"    相似度 {similarity:.5f} < {BACK_MATCH_THRESHOLD:.3f}，"
-        "使用 fingerprint 判断..."
-    )
     from policy_expr.recon.fingerprint import compute_fingerprint
 
     if initial_fingerprint is None:
@@ -102,12 +98,6 @@ def _matches_initial_layered(
     reason = f"fingerprint {'match' if matched else 'mismatch'}: [{current_fingerprint}]"
     return ScreenMatchDecision(matched, similarity, "fingerprint", reason)
 
-
-def _print_match_decision(prefix: str, decision: ScreenMatchDecision) -> None:
-    print(
-        f"    {prefix}: {decision.similarity:.5f} "
-        f"({decision.method}: {decision.reason})"
-    )
 
 
 def _back_tap_point(attempt: int) -> tuple[float, float]:
@@ -185,10 +175,6 @@ def infer_back_action(before_png: bytes, after_png: bytes | None) -> BackAction 
         ]),
     ]
     action = invoke_structured(llm, messages, BackAction)
-    print(
-        f"    LLM 返回建议: can_back={action.can_go_back}, "
-        f"method={action.method}, coords=({action.back_x:.0f},{action.back_y:.0f})"
-    )
     if not action.can_go_back:
         return None
     if not (0 <= action.back_x <= 1000 and 0 <= action.back_y <= 1000):
@@ -212,16 +198,14 @@ def _tap_back_once(
     """One attempt to go back. Returns (matched, fingerprint)."""
 
     if llm_back_action is not None:
-        lx, ly, response = tap_llm_back(client, llm_back_action)
-        print(f"    返回尝试 LLM: {llm_back_action.method} ({lx:.0f},{ly:.0f})")
+        lx, ly, _ = tap_llm_back(client, llm_back_action)
+        action_desc = f"[LLM] {llm_back_action.method}({lx:.0f},{ly:.0f})"
     elif attempt <= len(BACK_TAP_POINTS):
-        lx, ly, response = tap_back(client, attempt)
-        print(f"    返回尝试 {attempt}: 点左上角 ({lx:.0f},{ly:.0f})")
+        lx, ly, _ = tap_back(client, attempt)
+        action_desc = f"[{attempt}] 左上角({lx:.0f},{ly:.0f})"
     else:
-        (sx, sy), (ex, ey), response = swipe_back(client)
-        print(f"    返回尝试 {attempt}: 左边缘右滑 ({sx:.0f},{sy:.0f}) → ({ex:.0f},{ey:.0f})")
-    if response:
-        print(f"    返回结果: {response}")
+        (sx, sy), (ex, ey), _ = swipe_back(client)
+        action_desc = f"[{attempt}] 左滑({sx:.0f},{sy:.0f})→({ex:.0f},{ey:.0f})"
     time.sleep(BACK_SETTLE_SECONDS)
 
     back_bytes = screenshot()
@@ -232,15 +216,12 @@ def _tap_back_once(
     if before_back_bytes and back_bytes:
         action_similarity = png_similarity(before_back_bytes, back_bytes)
         if action_similarity >= BACK_ACTION_NO_CHANGE_THRESHOLD:
-            print(
-                f"    返回动作前后相似度 {action_similarity:.4f}，"
-                "页面未变化，继续尝试下一个返回动作"
-            )
+            print(f"    ↩ {action_desc} → 未变化")
             return False, initial_fingerprint
 
     decision = _matches_initial_layered(initial_page, initial_bytes, back_bytes, initial_fingerprint)
-    attempt_label = "LLM" if llm_back_action is not None else str(attempt)
-    _print_match_decision(f"  返回尝试 {attempt_label}", decision)
+    status = f"✓ {decision.similarity:.3f}" if decision.matched else f"✗ {decision.similarity:.3f}"
+    print(f"    ↩ {action_desc} → {status}")
     return bool(decision.matched), initial_fingerprint
 
 
