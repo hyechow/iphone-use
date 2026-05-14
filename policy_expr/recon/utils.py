@@ -13,6 +13,23 @@ from PIL import Image, ImageDraw, ImageFont
 from policy_expr.recon.page_parser import ParsedPage
 
 
+# ── Exceptions ────────────────────────────────────────────
+
+class ProbeAbortedError(RuntimeError):
+    """Raised when probe_elements cannot return to initial page after a tap."""
+    def __init__(
+        self,
+        message: str,
+        failed_tap: int,
+        failed_element: str,
+        back_attempts: list[dict],
+    ):
+        super().__init__(message)
+        self.failed_tap = failed_tap
+        self.failed_element = failed_element
+        self.back_attempts = back_attempts  # list of {strategy, coords, score, success}
+
+
 # ── Data classes ──────────────────────────────────────────
 
 @dataclass
@@ -26,6 +43,7 @@ class TapResult:
     tap_ok: bool
     screenshot_path: str
     navigated: bool = False
+    back_attempts: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -59,6 +77,7 @@ class ReconResult:
                     "tap_ok": t.tap_ok,
                     "navigated": t.navigated,
                     "screenshot": t.screenshot_path,
+                    "back_attempts": t.back_attempts,
                 }
                 for t in self.taps
             ],

@@ -18,6 +18,7 @@ from policy_expr.policies.base import resize_to_logical_png
 from policy_expr.perception import try_resume_mac
 from policy_expr.recon.page_parser import PageKnowledge
 from policy_expr.recon.utils import (
+    ProbeAbortedError,
     ReconResult,
     ScreenMatchDecision,
     TapResult,
@@ -192,35 +193,48 @@ def _tap_back_once(
     attempt: int,
     llm_back_action: BackAction | None = None,
     parent_bytes: bytes | None = None,
+    log: list[dict] | None = None,
 ) -> tuple[bool, bool, str | None]:
     """One attempt to go back. Returns (matched_initial, on_parent, fingerprint)."""
 
     if llm_back_action is not None:
         lx, ly, _ = tap_llm_back(client, llm_back_action)
+        strategy = "LLM"
         action_desc = f"[LLM] {llm_back_action.method}({lx:.0f},{ly:.0f})"
     else:
         lx, ly, _ = tap_back(client, attempt)
+        strategy = f"fixed_{attempt}"
         action_desc = f"[{attempt}] 左上角({lx:.0f},{ly:.0f})"
     time.sleep(BACK_SETTLE_SECONDS)
 
     back_bytes = screenshot()
-
-    if before_back_bytes and back_bytes:
-        action_similarity = png_similarity(before_back_bytes, back_bytes)
-        if action_similarity >= BACK_ACTION_NO_CHANGE_THRESHOLD:
-            print(f"    ↩ {action_desc} → 未变化")
-            return False, False, initial_fingerprint
 
     # Check parent page first (cheap pixel comparison)
     if parent_bytes and back_bytes:
         parent_sim = png_similarity(parent_bytes, back_bytes)
         if parent_sim >= BACK_MATCH_THRESHOLD:
             print(f"    ↩ {action_desc} → 父页面 {parent_sim:.3f}")
+            if log is not None:
+                log.append({"strategy": strategy, "coords": [round(lx), round(ly)],
+                            "result": "父页面", "score": round(parent_sim, 3), "success": False})
             return False, True, initial_fingerprint
+
+    if before_back_bytes and back_bytes:
+        action_similarity = png_similarity(before_back_bytes, back_bytes)
+        if action_similarity >= BACK_ACTION_NO_CHANGE_THRESHOLD:
+            print(f"    ↩ {action_desc} → 未变化")
+            if log is not None:
+                log.append({"strategy": strategy, "coords": [round(lx), round(ly)],
+                            "result": "未变化", "score": round(action_similarity, 3), "success": False})
+            return False, False, initial_fingerprint
 
     decision = _matches_initial_layered(initial_bytes, back_bytes, initial_fingerprint)
     status = f"✓ {decision.similarity:.3f}" if decision.matched else f"✗ {decision.similarity:.3f}"
     print(f"    ↩ {action_desc} → {status}")
+    if log is not None:
+        log.append({"strategy": strategy, "coords": [round(lx), round(ly)],
+                    "result": "匹配" if decision.matched else "不匹配",
+                    "score": round(decision.similarity, 3), "success": bool(decision.matched)})
     return bool(decision.matched), False, initial_fingerprint
 
 
@@ -231,23 +245,25 @@ def return_to_initial(
     before_back_bytes: bytes | None,
     initial_fingerprint: str | None = None,
     parent_bytes: bytes | None = None,
-) -> tuple[bool, bool]:
+) -> tuple[bool, bool, list[dict]]:
     """Navigate back to the initial page, retrying up to BACK_MAX_RETRIES times.
 
-    Returns (matched_initial, on_parent).
+    Returns (matched_initial, on_parent, attempt_log).
+    attempt_log records each strategy tried: {strategy, coords, result, score, success}.
     """
     fp = initial_fingerprint
+    log: list[dict] = []
 
     for attempt in range(1, BACK_MAX_RETRIES + 1):
         matched, on_parent, fp = _tap_back_once(
             client, screenshot, initial_bytes,
             before_back_bytes, fp, attempt,
-            parent_bytes=parent_bytes,
+            parent_bytes=parent_bytes, log=log,
         )
         if matched:
-            return True, False
+            return True, False, log
         if on_parent:
-            return False, True
+            return False, True, log
         before_back_bytes = screenshot()
 
     # Run YOLO detection once, reuse for both fallback and LLM correction
@@ -274,19 +290,26 @@ def return_to_initial(
                     parent_sim = png_similarity(parent_bytes, back_bytes)
                     if parent_sim >= BACK_MATCH_THRESHOLD:
                         print(f"    ↩ {action_desc} → 父页面 {parent_sim:.3f}")
-                        return False, True
+                        log.append({"strategy": "YOLO", "coords": [round(lx), round(ly)],
+                                    "result": "父页面", "score": round(parent_sim, 3), "success": False})
+                        return False, True, log
 
                 decision = _matches_initial_layered(initial_bytes, back_bytes, fp)
                 status = f"✓ {decision.similarity:.3f}" if decision.matched else f"✗ {decision.similarity:.3f}"
                 print(f"    ↩ {action_desc} → {status}")
+                log.append({"strategy": "YOLO", "coords": [round(lx), round(ly)],
+                            "result": "匹配" if decision.matched else "不匹配",
+                            "score": round(decision.similarity, 3), "success": bool(decision.matched)})
                 if decision.matched:
-                    return True, False
+                    return True, False, log
                 fp = decision.reason
                 before_back_bytes = screenshot()
         else:
             print("    [YOLO] 搜索范围内无图标")
+            log.append({"strategy": "YOLO", "result": "搜索范围内无图标", "success": False})
     else:
         print("    [YOLO] 未检测到图标")
+        log.append({"strategy": "YOLO", "result": "未检测到图标", "success": False})
 
     # LLM fallback: ask vision model for back action
     current_bytes = screenshot()
@@ -295,12 +318,12 @@ def return_to_initial(
         matched, on_parent, fp = _tap_back_once(
             client, screenshot, initial_bytes,
             before_back_bytes, fp, 0,
-            llm_back_action=llm_action, parent_bytes=parent_bytes,
+            llm_back_action=llm_action, parent_bytes=parent_bytes, log=log,
         )
         if matched:
-            return True, False
+            return True, False, log
         if on_parent:
-            return False, True
+            return False, True, log
         before_back_bytes = screenshot()
 
         # LLM click didn't work — try YOLO correction near LLM's target
@@ -322,18 +345,24 @@ def return_to_initial(
                         parent_sim = png_similarity(parent_bytes, back_bytes)
                         if parent_sim >= BACK_MATCH_THRESHOLD:
                             print(f"    ↩ {action_desc} → 父页面 {parent_sim:.3f}")
-                            return False, True
+                            log.append({"strategy": "LLM+YOLO", "coords": [round(lx), round(ly)],
+                                        "result": "父页面", "score": round(parent_sim, 3), "success": False})
+                            return False, True, log
 
                     decision = _matches_initial_layered(initial_bytes, back_bytes, fp)
                     status = f"✓ {decision.similarity:.3f}" if decision.matched else f"✗ {decision.similarity:.3f}"
                     print(f"    ↩ {action_desc} → {status}")
+                    log.append({"strategy": "LLM+YOLO", "coords": [round(lx), round(ly)],
+                                "result": "匹配" if decision.matched else "不匹配",
+                                "score": round(decision.similarity, 3), "success": bool(decision.matched)})
                     if decision.matched:
-                        return True, False
+                        return True, False, log
     else:
         print("    [LLM] 未能识别返回动作")
+        log.append({"strategy": "LLM", "result": "未能识别返回动作", "success": False})
 
     print("    所有回退策略均未成功返回初始页面")
-    return False, False
+    return False, False, log
 
 
 def probe_elements(
@@ -443,14 +472,18 @@ def probe_elements(
                 and png_similarity(parent_bytes, after_bytes) >= BACK_MATCH_THRESHOLD
             )
             if not on_parent and initial_bytes:
-                matched, on_parent = return_to_initial(
+                matched, on_parent, back_log = return_to_initial(
                     client, screenshot, initial_bytes,
                     after_bytes,
                     parent_bytes=parent_bytes,
                 )
+                result.taps[-1].back_attempts = back_log
                 if not matched and not on_parent:
-                    raise RuntimeError(
-                        f"无法返回子页面（探测第 {i} 个元素「{area.label}」后），终止探测"
+                    raise ProbeAbortedError(
+                        f"无法返回子页面（探测第 {i} 个元素「{area.label}」后），终止探测",
+                        failed_tap=i,
+                        failed_element=area.label,
+                        back_attempts=back_log,
                     )
 
             if on_parent:
@@ -471,11 +504,22 @@ def probe_elements(
         current_bytes = screenshot()
         decision = _matches_initial_layered(initial_bytes, current_bytes, None)
         if not decision.matched:
-            matched, _ = return_to_initial(
+            matched, on_parent, back_log = return_to_initial(
                 client, screenshot, initial_bytes,
                 current_bytes,
+                parent_bytes=parent_bytes,
             )
-            if not matched:
-                raise RuntimeError("探测完成后无法返回初始页面，终止")
+            if matched:
+                pass
+            elif on_parent and re_nav:
+                client.tap(re_nav[0], re_nav[1])
+                time.sleep(2.0)
+            else:
+                raise ProbeAbortedError(
+                    "探测完成后无法返回初始页面，终止",
+                    failed_tap=-1,
+                    failed_element="",
+                    back_attempts=back_log,
+                )
 
     return result
