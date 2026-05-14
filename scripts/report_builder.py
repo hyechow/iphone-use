@@ -192,6 +192,7 @@ class ReconTap:
     y: float
     navigated: bool
     after_url: str | None  # screenshot after tap
+    back_seq: list[dict] = field(default_factory=list)  # {"src": data_url, "subtitle": str, "success": bool}
 
 
 @dataclass
@@ -252,20 +253,9 @@ def _build_nav_tree(pages: list[ReconPageInfo], trace: list[dict] | None = None)
             if child not in parent.children:
                 parent.children.append(child)
                 has_parent.add(page_name)
-        # Append unexplored flow targets as leaves.
-        # Prefer a deeper explored page whose name is a strict prefix of the target
-        # (e.g. "已登录设备详情" → parent "已登录设备" rather than "聊天列表").
-        for page in pages:
-            for flow in page.flows:
-                target = flow.target_page
-                if target in node_map:
-                    continue
-                parent_name = page.name
-                for other in pages:
-                    if other.name != page.name and target.startswith(other.name):
-                        parent_name = other.name
-                        break
-                node_map[parent_name].children.append(NavNode(name=target, page=None))
+        # When BFS trace is available, only show BFS-explored pages in the tree.
+        # Flow targets are AI-generated names that may not match BFS page names,
+        # can include back-navigation (parent pages), and cause duplicate/misplaced nodes.
     else:
         # Fallback: infer from page_flows.json with fuzzy name matching
         known: dict[str, ReconPageInfo] = {}
@@ -488,6 +478,40 @@ class ReconReportBuilder:
                     total_navigated += 1
                 tap_path = Path(tap.get("screenshot", ""))
                 after_url = _img_to_data_url(tap_path.read_bytes()) if tap_path.exists() else None
+
+                # Build full back-navigation sequence for navigated taps
+                back_seq: list[dict] = []
+                if navigated and after_url:
+                    # Step 1: initial page with single tap marker
+                    single_point = [(tap["x"], tap["y"], tap["index"], True)]
+                    before_img = annotate_recon_taps(initial_img.copy(), single_point)
+                    back_seq.append({"src": _img_to_data_url(img_to_bytes(before_img)), "subtitle": "", "success": None})
+                    # Step 2: navigated page, annotate with first back-attempt coords if available
+                    back_attempts_raw = tap.get("back_attempts", [])
+                    if back_attempts_raw and tap_path.exists():
+                        after_img = _load_img(tap_path)
+                        after_ann = annotate_back_attempts_img(after_img, [back_attempts_raw[0]])
+                        step2_src = _img_to_data_url(img_to_bytes(after_ann))
+                        step2_sub = f"回退策略: {back_attempts_raw[0].get('strategy', '')}"
+                    else:
+                        step2_src = after_url
+                        step2_sub = "已导航"
+                    back_seq.append({"src": step2_src, "subtitle": step2_sub, "success": None})
+                    # Steps 3+: each back attempt that has a screenshot
+                    for attempt in tap.get("back_attempts", []):
+                        shot = Path(attempt.get("screenshot", ""))
+                        if not shot.exists():
+                            continue
+                        result_txt = attempt.get("result", "")
+                        score = attempt.get("score")
+                        score_str = f" {score:.3f}" if score is not None else ""
+                        success = attempt.get("success", False)
+                        back_seq.append({
+                            "src": _img_to_data_url(shot.read_bytes()),
+                            "subtitle": f"{'匹配' if success else result_txt}{score_str}",
+                            "success": success,
+                        })
+
                 taps.append(ReconTap(
                     index=tap["index"],
                     label=tap.get("label", ""),
@@ -495,6 +519,7 @@ class ReconReportBuilder:
                     y=tap.get("y", 0),
                     navigated=navigated,
                     after_url=after_url,
+                    back_seq=back_seq,
                 ))
 
             # Load flows
@@ -870,22 +895,25 @@ RECON_HTML_TEMPLATE = """\
   /* ── Modal ── */
   .modal {{
     display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-    background: rgba(0,0,0,0.85); z-index: 1000;
+    background: rgba(0,0,0,0.88); z-index: 1000;
     justify-content: center; align-items: center; gap: 16px;
   }}
   .modal.show {{ display: flex; }}
+  #modal-simple {{ display: flex; align-items: center; gap: 16px; }}
   .modal-panel {{
     background: white; border-radius: 12px; padding: 12px;
     display: flex; flex-direction: column; align-items: center; gap: 8px;
-    max-height: 90vh;
+    max-height: 90vh; border: 2px solid transparent;
   }}
-  .modal-panel img {{ max-height: calc(90vh - 60px); max-width: 380px; border-radius: 8px; object-fit: contain; }}
-  .modal-label {{ font-size: 12px; color: #64748b; }}
+  .modal-panel img {{ max-height: calc(90vh - 60px); max-width: 320px; border-radius: 8px; object-fit: contain; }}
+  .modal-label {{ font-size: 11px; color: #64748b; text-align: center; max-width: 280px; }}
   .modal-close {{
     position: fixed; top: 20px; right: 24px; font-size: 28px; color: white;
-    cursor: pointer; line-height: 1; opacity: 0.8;
+    cursor: pointer; line-height: 1; opacity: 0.8; z-index: 1001;
   }}
   .modal-close:hover {{ opacity: 1; }}
+  .tap-seq-btn {{ background: #ede9fe; border-color: #c4b5fd; color: #6d28d9; }}
+  .tap-seq-btn:hover {{ background: #ddd6fe; border-color: #a78bfa; color: #5b21b6; }}
 </style>
 </head>
 <body>
@@ -915,19 +943,28 @@ RECON_HTML_TEMPLATE = """\
 <!-- Modal -->
 <div class="modal" id="modal" onclick="closeModal(event)">
   <div class="modal-close" onclick="document.getElementById('modal').classList.remove('show')">✕</div>
-  <div class="modal-panel" id="modal-before">
-    <img id="modal-before-img" src="">
-    <div class="modal-label">操作前</div>
+  <!-- Simple zoom mode -->
+  <div id="modal-simple" style="display:none">
+    <div class="modal-panel" id="modal-before">
+      <img id="modal-before-img" src="">
+      <div class="modal-label">操作前</div>
+    </div>
+    <div id="modal-arrow" style="font-size:28px;color:white;display:none">→</div>
+    <div class="modal-panel" id="modal-after-panel" style="display:none">
+      <img id="modal-after-img" src="">
+      <div class="modal-label" id="modal-after-label"></div>
+    </div>
   </div>
-  <div id="modal-arrow" style="font-size:28px;color:white;display:none">→</div>
-  <div class="modal-panel" id="modal-after-panel" style="display:none">
-    <img id="modal-after-img" src="">
-    <div class="modal-label" id="modal-after-label"></div>
+  <!-- Sequence mode -->
+  <div id="modal-seq-wrap" style="display:none;overflow-x:auto;max-width:96vw;padding:8px">
+    <div id="modal-seq" style="display:flex;align-items:flex-start;gap:12px;min-width:max-content"></div>
   </div>
 </div>
 
 <script>
 function openModal(beforeSrc, afterSrc, label) {{
+  document.getElementById('modal-simple').style.display = 'flex';
+  document.getElementById('modal-seq-wrap').style.display = 'none';
   document.getElementById('modal-before-img').src = beforeSrc;
   var afterPanel = document.getElementById('modal-after-panel');
   var arrow = document.getElementById('modal-arrow');
@@ -940,6 +977,38 @@ function openModal(beforeSrc, afterSrc, label) {{
     afterPanel.style.display = 'none';
     arrow.style.display = 'none';
   }}
+  document.getElementById('modal').classList.add('show');
+}}
+function openSeq(key) {{
+  var steps = (window._seqs || {{}})[key] || [];
+  var seq = document.getElementById('modal-seq');
+  seq.innerHTML = '';
+  steps.forEach(function(step, i) {{
+    if (i > 0) {{
+      var arr = document.createElement('div');
+      arr.style.cssText = 'font-size:22px;color:rgba(255,255,255,0.5);align-self:center;flex-shrink:0';
+      arr.textContent = '→';
+      seq.appendChild(arr);
+    }}
+    var panel = document.createElement('div');
+    panel.className = 'modal-panel';
+    if (step.success === true) panel.style.borderColor = 'rgba(34,197,94,0.5)';
+    else if (step.success === false) panel.style.borderColor = 'rgba(239,68,68,0.4)';
+    var img = document.createElement('img');
+    img.src = step.src;
+    img.style.cursor = 'default';
+    var lbl = document.createElement('div');
+    lbl.className = 'modal-label';
+    lbl.style.whiteSpace = 'nowrap';
+    lbl.textContent = '步骤 ' + (i + 1) + (step.subtitle ? ': ' + step.subtitle : '');
+    if (step.success === true) lbl.style.color = '#4ade80';
+    else if (step.success === false) lbl.style.color = '#f87171';
+    panel.appendChild(img);
+    panel.appendChild(lbl);
+    seq.appendChild(panel);
+  }});
+  document.getElementById('modal-simple').style.display = 'none';
+  document.getElementById('modal-seq-wrap').style.display = '';
   document.getElementById('modal').classList.add('show');
 }}
 function showTapResult(btn) {{
@@ -999,22 +1068,33 @@ def _render_page_card_html(node: NavNode, path: list[str]) -> str:
                 flow_by_tap[tap.index] = flow
                 used_flows.add(fi)
                 break
-    unmatched_flows = [f for fi, f in enumerate(page.flows) if fi not in used_flows]
-
     # Merged tap + flow table
     tap_rows = ""
+    seq_scripts = ""
     for tap in page.taps:
         if tap.navigated:
             matched = flow_by_tap.get(tap.index)
             target_chip = f'<span class="tap-target">→ {matched.target_page}</span>' if matched else ''
             status_html = f'<span class="tap-nav">✓ 导航成功</span>{target_chip}'
-            after_attr = f' data-after="{tap.after_url}"' if tap.after_url else ""
-            tap_lbl = f"tap_{tap.index}: {tap.label}"
-            btn = (
-                f'<button class="tap-preview-btn"'
-                f' data-label="{tap_lbl}"{after_attr}'
-                f' onclick="showTapResult(this)">查看结果</button>'
-            )
+            seq_key = f"{_slug(page.name)}-{tap.index}"
+            if len(tap.back_seq) > 1:
+                # Full sequence available — emit JS and use openSeq button
+                import json as _json
+                seq_json = _json.dumps(tap.back_seq)
+                seq_scripts += f'_seqs[{_json.dumps(seq_key)}]={seq_json};\n'
+                btn = (
+                    f'<button class="tap-preview-btn tap-seq-btn"'
+                    f" onclick=\"openSeq('{seq_key}')\">查看全过程 ({len(tap.back_seq)})</button>"
+                )
+            elif tap.after_url:
+                tap_lbl = f"tap_{tap.index}: {tap.label}"
+                btn = (
+                    f'<button class="tap-preview-btn"'
+                    f' data-label="{tap_lbl}" data-after="{tap.after_url}"'
+                    f' onclick="showTapResult(this)">查看结果</button>'
+                )
+            else:
+                btn = ""
         else:
             status_html = '<span class="tap-none">— 无变化</span>'
             btn = ""
@@ -1026,18 +1106,9 @@ def _render_page_card_html(node: NavNode, path: list[str]) -> str:
               <td>{btn}</td>
             </tr>"""
 
-    # Unmatched flows as extra rows with flow description as label
-    for flow in unmatched_flows:
-        short_desc = flow.flow_description[:40] + ("…" if len(flow.flow_description) > 40 else "")
-        tap_rows += f"""
-            <tr class="flow-extra-row">
-              <td class="tap-num">·</td>
-              <td class="tap-label" title="{flow.flow_description}">{short_desc}</td>
-              <td class="tap-status" colspan="2"><span class="tap-target">→ {flow.target_page}</span></td>
-            </tr>"""
-
     nav_count = sum(1 for t in page.taps if t.navigated)
-    flows_label = f" · {len(page.flows)} 条路径" if page.flows else ""
+    matched_flows_count = len(used_flows)
+    flows_label = f" · {matched_flows_count} 条路径" if matched_flows_count else ""
     tap_section = f"""
         <div>
           <div class="section-label">点击探测 ({nav_count}/{len(page.taps)} 导航成功{flows_label})</div>
@@ -1059,8 +1130,9 @@ def _render_page_card_html(node: NavNode, path: list[str]) -> str:
             </details>"""
 
     card_cls = "page-card page-card-error" if page.error else "page-card"
+    seq_init = f"<script>if(!window._seqs)window._seqs={{}};\n{seq_scripts}</script>" if seq_scripts else ""
     card_html = f"""
-        <div class="{card_cls}" id="{slug}">
+        {seq_init}<div class="{card_cls}" id="{slug}">
           {breadcrumb_html}
           <div class="page-card-header">
             <h2>{page.title}</h2>

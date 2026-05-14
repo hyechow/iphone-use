@@ -184,6 +184,21 @@ def infer_back_action(before_png: bytes, after_png: bytes | None) -> BackAction 
     return action
 
 
+def _back_shot_path(out_dir: Path | None, tap_index: int, attempt_num: int) -> Path | None:
+    if out_dir is None:
+        return None
+    prefix = f"tap_{tap_index:02d}" if tap_index > 0 else "end"
+    return out_dir / f"{prefix}_back_{attempt_num:02d}.png"
+
+
+def _save_if_changed(png_bytes: bytes | None, path: Path | None) -> str:
+    """Save screenshot only when the screen actually changed. Returns path str or ''."""
+    if path and png_bytes:
+        path.write_bytes(png_bytes)
+        return str(path)
+    return ""
+
+
 def _tap_back_once(
     client,
     screenshot: Callable[[], bytes],
@@ -194,6 +209,7 @@ def _tap_back_once(
     llm_back_action: BackAction | None = None,
     parent_bytes: bytes | None = None,
     log: list[dict] | None = None,
+    save_path: Path | None = None,
 ) -> tuple[bool, bool, str | None]:
     """One attempt to go back. Returns (matched_initial, on_parent, fingerprint)."""
 
@@ -214,9 +230,11 @@ def _tap_back_once(
         parent_sim = png_similarity(parent_bytes, back_bytes)
         if parent_sim >= BACK_MATCH_THRESHOLD:
             print(f"    ↩ {action_desc} → 父页面 {parent_sim:.3f}")
+            shot_str = _save_if_changed(back_bytes, save_path)
             if log is not None:
                 log.append({"strategy": strategy, "coords": [round(lx), round(ly)],
-                            "result": "父页面", "score": round(parent_sim, 3), "success": False})
+                            "result": "父页面", "score": round(parent_sim, 3), "success": False,
+                            "screenshot": shot_str})
             return False, True, initial_fingerprint
 
     if before_back_bytes and back_bytes:
@@ -225,16 +243,19 @@ def _tap_back_once(
             print(f"    ↩ {action_desc} → 未变化")
             if log is not None:
                 log.append({"strategy": strategy, "coords": [round(lx), round(ly)],
-                            "result": "未变化", "score": round(action_similarity, 3), "success": False})
+                            "result": "未变化", "score": round(action_similarity, 3), "success": False,
+                            "screenshot": ""})  # no save: screen unchanged
             return False, False, initial_fingerprint
 
     decision = _matches_initial_layered(initial_bytes, back_bytes, initial_fingerprint)
     status = f"✓ {decision.similarity:.3f}" if decision.matched else f"✗ {decision.similarity:.3f}"
     print(f"    ↩ {action_desc} → {status}")
+    shot_str = _save_if_changed(back_bytes, save_path)
     if log is not None:
         log.append({"strategy": strategy, "coords": [round(lx), round(ly)],
                     "result": "匹配" if decision.matched else "不匹配",
-                    "score": round(decision.similarity, 3), "success": bool(decision.matched)})
+                    "score": round(decision.similarity, 3), "success": bool(decision.matched),
+                    "screenshot": shot_str})
     return bool(decision.matched), False, initial_fingerprint
 
 
@@ -245,20 +266,24 @@ def return_to_initial(
     before_back_bytes: bytes | None,
     initial_fingerprint: str | None = None,
     parent_bytes: bytes | None = None,
+    out_dir: Path | None = None,
+    tap_index: int = 0,
 ) -> tuple[bool, bool, list[dict]]:
     """Navigate back to the initial page, retrying up to BACK_MAX_RETRIES times.
 
     Returns (matched_initial, on_parent, attempt_log).
-    attempt_log records each strategy tried: {strategy, coords, result, score, success}.
+    attempt_log records each strategy: {strategy, coords, result, score, success, screenshot}.
+    If out_dir is given, saves a screenshot after each back attempt.
     """
     fp = initial_fingerprint
     log: list[dict] = []
 
     for attempt in range(1, BACK_MAX_RETRIES + 1):
+        save_path = _back_shot_path(out_dir, tap_index, len(log) + 1)
         matched, on_parent, fp = _tap_back_once(
             client, screenshot, initial_bytes,
             before_back_bytes, fp, attempt,
-            parent_bytes=parent_bytes, log=log,
+            parent_bytes=parent_bytes, log=log, save_path=save_path,
         )
         if matched:
             return True, False, log
@@ -283,6 +308,8 @@ def return_to_initial(
             time.sleep(BACK_SETTLE_SECONDS)
 
             back_bytes = screenshot()
+            yolo_save = _back_shot_path(out_dir, tap_index, len(log) + 1)
+
             if not (before_back_bytes and back_bytes
                     and png_similarity(before_back_bytes, back_bytes) >= BACK_ACTION_NO_CHANGE_THRESHOLD):
 
@@ -291,7 +318,8 @@ def return_to_initial(
                     if parent_sim >= BACK_MATCH_THRESHOLD:
                         print(f"    ↩ {action_desc} → 父页面 {parent_sim:.3f}")
                         log.append({"strategy": "YOLO", "coords": [round(lx), round(ly)],
-                                    "result": "父页面", "score": round(parent_sim, 3), "success": False})
+                                    "result": "父页面", "score": round(parent_sim, 3), "success": False,
+                                    "screenshot": _save_if_changed(back_bytes, yolo_save)})
                         return False, True, log
 
                 decision = _matches_initial_layered(initial_bytes, back_bytes, fp)
@@ -299,26 +327,31 @@ def return_to_initial(
                 print(f"    ↩ {action_desc} → {status}")
                 log.append({"strategy": "YOLO", "coords": [round(lx), round(ly)],
                             "result": "匹配" if decision.matched else "不匹配",
-                            "score": round(decision.similarity, 3), "success": bool(decision.matched)})
+                            "score": round(decision.similarity, 3), "success": bool(decision.matched),
+                            "screenshot": _save_if_changed(back_bytes, yolo_save)})
                 if decision.matched:
                     return True, False, log
                 fp = decision.reason
                 before_back_bytes = screenshot()
+            else:
+                log.append({"strategy": "YOLO", "coords": [round(lx), round(ly)],
+                            "result": "未变化", "success": False, "screenshot": ""})
         else:
             print("    [YOLO] 搜索范围内无图标")
-            log.append({"strategy": "YOLO", "result": "搜索范围内无图标", "success": False})
+            log.append({"strategy": "YOLO", "result": "搜索范围内无图标", "success": False, "screenshot": ""})
     else:
         print("    [YOLO] 未检测到图标")
-        log.append({"strategy": "YOLO", "result": "未检测到图标", "success": False})
+        log.append({"strategy": "YOLO", "result": "未检测到图标", "success": False, "screenshot": ""})
 
     # LLM fallback: ask vision model for back action
     current_bytes = screenshot()
     llm_action = infer_back_action(initial_bytes, current_bytes)
     if llm_action is not None:
+        save_path = _back_shot_path(out_dir, tap_index, len(log) + 1)
         matched, on_parent, fp = _tap_back_once(
             client, screenshot, initial_bytes,
             before_back_bytes, fp, 0,
-            llm_back_action=llm_action, parent_bytes=parent_bytes, log=log,
+            llm_back_action=llm_action, parent_bytes=parent_bytes, log=log, save_path=save_path,
         )
         if matched:
             return True, False, log
@@ -338,15 +371,19 @@ def return_to_initial(
                 time.sleep(BACK_SETTLE_SECONDS)
 
                 back_bytes = screenshot()
+                ly_save = _back_shot_path(out_dir, tap_index, len(log) + 1)
+
                 if not (before_back_bytes and back_bytes
                         and png_similarity(before_back_bytes, back_bytes) >= BACK_ACTION_NO_CHANGE_THRESHOLD):
 
+                    shot_str = _save_if_changed(back_bytes, ly_save)
                     if parent_bytes and back_bytes:
                         parent_sim = png_similarity(parent_bytes, back_bytes)
                         if parent_sim >= BACK_MATCH_THRESHOLD:
                             print(f"    ↩ {action_desc} → 父页面 {parent_sim:.3f}")
                             log.append({"strategy": "LLM+YOLO", "coords": [round(lx), round(ly)],
-                                        "result": "父页面", "score": round(parent_sim, 3), "success": False})
+                                        "result": "父页面", "score": round(parent_sim, 3), "success": False,
+                                        "screenshot": shot_str})
                             return False, True, log
 
                     decision = _matches_initial_layered(initial_bytes, back_bytes, fp)
@@ -354,12 +391,16 @@ def return_to_initial(
                     print(f"    ↩ {action_desc} → {status}")
                     log.append({"strategy": "LLM+YOLO", "coords": [round(lx), round(ly)],
                                 "result": "匹配" if decision.matched else "不匹配",
-                                "score": round(decision.similarity, 3), "success": bool(decision.matched)})
+                                "score": round(decision.similarity, 3), "success": bool(decision.matched),
+                                "screenshot": shot_str})
                     if decision.matched:
                         return True, False, log
+                else:
+                    log.append({"strategy": "LLM+YOLO", "coords": [round(lx), round(ly)],
+                                "result": "未变化", "score": 0.0, "success": False, "screenshot": ""})
     else:
         print("    [LLM] 未能识别返回动作")
-        log.append({"strategy": "LLM", "result": "未能识别返回动作", "success": False})
+        log.append({"strategy": "LLM", "result": "未能识别返回动作", "success": False, "screenshot": ""})
 
     print("    所有回退策略均未成功返回初始页面")
     return False, False, log
@@ -476,6 +517,8 @@ def probe_elements(
                     client, screenshot, initial_bytes,
                     after_bytes,
                     parent_bytes=parent_bytes,
+                    out_dir=tap_dir,
+                    tap_index=i,
                 )
                 result.taps[-1].back_attempts = back_log
                 if not matched and not on_parent:
@@ -508,6 +551,8 @@ def probe_elements(
                 client, screenshot, initial_bytes,
                 current_bytes,
                 parent_bytes=parent_bytes,
+                out_dir=tap_dir,
+                tap_index=0,
             )
             if matched:
                 pass
