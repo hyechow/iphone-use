@@ -92,18 +92,19 @@ class ScreenMatchDecision:
 
 
 def png_similarity(png1: bytes, png2: bytes, size: int = SCREEN_MATCH_SIZE) -> float:
-    """Return SSIM between two PNG images (structural similarity, robust to dynamic content)."""
-    img1 = np.array(Image.open(io.BytesIO(png1)).convert("L").resize((size, size)), dtype=np.float64)
-    img2 = np.array(Image.open(io.BytesIO(png2)).convert("L").resize((size, size)), dtype=np.float64)
-    mu1 = img1.mean()
-    mu2 = img2.mean()
-    sigma1_sq = img1.var()
-    sigma2_sq = img2.var()
-    sigma12 = ((img1 - mu1) * (img2 - mu2)).mean()
-    c1 = (0.01 * 255) ** 2
-    c2 = (0.03 * 255) ** 2
-    ssim = ((2 * mu1 * mu2 + c1) * (2 * sigma12 + c2)) / ((mu1**2 + mu2**2 + c1) * (sigma1_sq + sigma2_sq + c2))
-    return float(ssim)
+    """Return edge IoU between two PNG images (robust to dynamic content changes)."""
+    from skimage.feature import canny
+
+    img1 = np.array(Image.open(io.BytesIO(png1)).convert("L"), dtype=np.float64) / 255.0
+    img2_raw = Image.open(io.BytesIO(png2)).convert("L")
+    if img1.shape != img2_raw.size[::-1]:
+        img2_raw = img2_raw.resize((img1.shape[1], img1.shape[0]))
+    img2 = np.array(img2_raw, dtype=np.float64) / 255.0
+    e1 = canny(img1).astype(np.float64)
+    e2 = canny(img2).astype(np.float64)
+    intersection = (e1 * e2).sum()
+    union = (e1 + e2).clip(0, 1).sum()
+    return float(intersection / union) if union > 0 else 0.0
 
 
 def matches_initial(

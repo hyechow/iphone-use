@@ -26,16 +26,12 @@ from policy_expr.recon.utils import (
 
 
 BACK_TAP_CENTER = (70.0, 125.0)
-BACK_TAP_JITTER = (3.0, 3.0)
+BACK_TAP_MAX_DIST = 80.0
+BACK_TAP_JITTER = 10.0
 BACK_SETTLE_SECONDS = 1.5
-BACK_ACTION_NO_CHANGE_THRESHOLD = 0.95
-BACK_MATCH_THRESHOLD = 0.88
-BACK_TAP_POINTS = (
-    BACK_TAP_CENTER,
-    (45.0, 125.0),
-)
-BACK_SWIPE_START = (12.0, 500.0)
-BACK_SWIPE_END = (620.0, 500.0)
+BACK_ACTION_NO_CHANGE_THRESHOLD = 0.80
+BACK_MATCH_THRESHOLD = 0.20
+BACK_TAP_POINTS = (BACK_TAP_CENTER,)
 
 
 class BackAction(BaseModel):
@@ -104,10 +100,9 @@ def _back_tap_point(attempt: int) -> tuple[float, float]:
     point = BACK_TAP_POINTS[(attempt - 1) % len(BACK_TAP_POINTS)]
     if attempt <= len(BACK_TAP_POINTS):
         return point
-    return (
-        point[0] + np.random.uniform(-BACK_TAP_JITTER[0], BACK_TAP_JITTER[0]),
-        point[1] + np.random.uniform(-BACK_TAP_JITTER[1], BACK_TAP_JITTER[1]),
-    )
+    angle = np.random.uniform(0, 2 * np.pi)
+    r = BACK_TAP_JITTER * np.sqrt(np.random.uniform(0, 1))
+    return (point[0] + r * np.cos(angle), point[1] + r * np.sin(angle))
 
 
 def tap_back(client, attempt: int = 1) -> tuple[float, float, str]:
@@ -129,20 +124,24 @@ def tap_llm_back(client, action: BackAction) -> tuple[float, float, str]:
     return lx, ly, result
 
 
-def swipe_back(client) -> tuple[tuple[float, float], tuple[float, float], str]:
-    """Use the iOS left-edge back gesture as a final fallback."""
+def tap_yolo_back(client, png_bytes: bytes) -> tuple[float, float, str] | None:
+    """Tap the YOLO-detected icon nearest to the back button region."""
     from policy_expr.executor import logical_xy
+    from policy_expr.recon.yolo_calibrator import YoloCalibrator
 
-    start_x, start_y = logical_xy(*BACK_SWIPE_START)
-    end_x, end_y = logical_xy(*BACK_SWIPE_END)
-    if not hasattr(client, "swipe"):
-        return (start_x, start_y), (end_x, end_y), "swipe unavailable"
-    result = client.swipe(start_x, start_y, end_x, end_y, duration_ms=450)
-    return (start_x, start_y), (end_x, end_y), result
+    cal = YoloCalibrator.from_png(png_bytes)
+    if cal is None:
+        return None
+    point = cal.nearest(*BACK_TAP_CENTER, max_dist=BACK_TAP_MAX_DIST)
+    if point is None:
+        return None
+    lx, ly = logical_xy(point[0], point[1])
+    resp = client.tap(lx, ly)
+    return lx, ly, resp
 
 
 BACK_MAX_RETRIES = len(BACK_TAP_POINTS)
-LLM_BACK_MAX_RETRIES = 3
+LLM_BACK_MAX_RETRIES = 1
 
 
 
@@ -151,7 +150,7 @@ def infer_back_action(before_png: bytes, after_png: bytes | None) -> BackAction 
     if not after_png:
         return None
 
-    cfg = resolve_llm_config("action_policy")
+    cfg = resolve_llm_config("back_nav")
     llm = ChatOpenAI(
         model=cfg.model,
         api_key=cfg.api_key,
@@ -199,12 +198,9 @@ def _tap_back_once(
     if llm_back_action is not None:
         lx, ly, _ = tap_llm_back(client, llm_back_action)
         action_desc = f"[LLM] {llm_back_action.method}({lx:.0f},{ly:.0f})"
-    elif attempt <= len(BACK_TAP_POINTS):
+    else:
         lx, ly, _ = tap_back(client, attempt)
         action_desc = f"[{attempt}] 左上角({lx:.0f},{ly:.0f})"
-    else:
-        (sx, sy), (ex, ey), _ = swipe_back(client)
-        action_desc = f"[{attempt}] 左滑({sx:.0f},{sy:.0f})→({ex:.0f},{ey:.0f})"
     time.sleep(BACK_SETTLE_SECONDS)
 
     back_bytes = screenshot()
@@ -241,7 +237,6 @@ def return_to_initial(
     Returns (matched_initial, on_parent).
     """
     fp = initial_fingerprint
-    clicked_page_bytes = before_back_bytes
 
     for attempt in range(1, BACK_MAX_RETRIES + 1):
         matched, on_parent, fp = _tap_back_once(
@@ -255,13 +250,48 @@ def return_to_initial(
             return False, True
         before_back_bytes = screenshot()
 
-    # LLM fallback: ask vision model for back action, up to LLM_BACK_MAX_RETRIES times
-    llm_bytes = clicked_page_bytes
-    for llm_attempt in range(1, LLM_BACK_MAX_RETRIES + 1):
-        llm_action = infer_back_action(initial_bytes, llm_bytes)
-        if llm_action is None:
-            print(f"    [LLM] 第 {llm_attempt} 次未能识别返回动作")
-            break
+    # Run YOLO detection once, reuse for both fallback and LLM correction
+    from policy_expr.recon.yolo_calibrator import YoloCalibrator
+
+    current_bytes = screenshot()
+    yolo_cal = YoloCalibrator.from_png(current_bytes)
+
+    # YOLO fallback: detect icon nearest to back button region
+    if yolo_cal is not None:
+        point = yolo_cal.nearest(*BACK_TAP_CENTER, max_dist=BACK_TAP_MAX_DIST)
+        if point is not None:
+            from policy_expr.executor import logical_xy
+            lx, ly = logical_xy(point[0], point[1])
+            action_desc = f"[YOLO] ({lx:.0f},{ly:.0f})"
+            client.tap(lx, ly)
+            time.sleep(BACK_SETTLE_SECONDS)
+
+            back_bytes = screenshot()
+            if not (before_back_bytes and back_bytes
+                    and png_similarity(before_back_bytes, back_bytes) >= BACK_ACTION_NO_CHANGE_THRESHOLD):
+
+                if parent_bytes and back_bytes:
+                    parent_sim = png_similarity(parent_bytes, back_bytes)
+                    if parent_sim >= BACK_MATCH_THRESHOLD:
+                        print(f"    ↩ {action_desc} → 父页面 {parent_sim:.3f}")
+                        return False, True
+
+                decision = _matches_initial_layered(initial_bytes, back_bytes, fp)
+                status = f"✓ {decision.similarity:.3f}" if decision.matched else f"✗ {decision.similarity:.3f}"
+                print(f"    ↩ {action_desc} → {status}")
+                if decision.matched:
+                    return True, False
+                fp = decision.reason
+                before_back_bytes = screenshot()
+        else:
+            print("    [YOLO] 搜索范围内无图标")
+    else:
+        print("    [YOLO] 未检测到图标")
+
+    # LLM fallback: ask vision model for back action
+    current_bytes = screenshot()
+    llm_action = infer_back_action(initial_bytes, current_bytes)
+    if llm_action is not None:
         matched, on_parent, fp = _tap_back_once(
             client, screenshot, initial_bytes,
             before_back_bytes, fp, 0,
@@ -271,9 +301,38 @@ def return_to_initial(
             return True, False
         if on_parent:
             return False, True
-        llm_bytes = screenshot()
+        before_back_bytes = screenshot()
 
-    print(f"    {BACK_MAX_RETRIES} 次预定义 + {LLM_BACK_MAX_RETRIES} 次 LLM 返回尝试后仍未回到初始页面")
+        # LLM click didn't work — try YOLO correction near LLM's target
+        if yolo_cal is not None:
+            yolo_point = yolo_cal.nearest(llm_action.back_x, llm_action.back_y, max_dist=BACK_TAP_MAX_DIST)
+            if yolo_point is not None:
+                from policy_expr.executor import logical_xy
+                lx, ly = logical_xy(yolo_point[0], yolo_point[1])
+                action_desc = f"[LLM+YOLO] ({lx:.0f},{ly:.0f})"
+                print(f"    ↩ {action_desc} 矫正 LLM 坐标 ({llm_action.back_x:.0f},{llm_action.back_y:.0f})")
+                client.tap(lx, ly)
+                time.sleep(BACK_SETTLE_SECONDS)
+
+                back_bytes = screenshot()
+                if not (before_back_bytes and back_bytes
+                        and png_similarity(before_back_bytes, back_bytes) >= BACK_ACTION_NO_CHANGE_THRESHOLD):
+
+                    if parent_bytes and back_bytes:
+                        parent_sim = png_similarity(parent_bytes, back_bytes)
+                        if parent_sim >= BACK_MATCH_THRESHOLD:
+                            print(f"    ↩ {action_desc} → 父页面 {parent_sim:.3f}")
+                            return False, True
+
+                    decision = _matches_initial_layered(initial_bytes, back_bytes, fp)
+                    status = f"✓ {decision.similarity:.3f}" if decision.matched else f"✗ {decision.similarity:.3f}"
+                    print(f"    ↩ {action_desc} → {status}")
+                    if decision.matched:
+                        return True, False
+    else:
+        print("    [LLM] 未能识别返回动作")
+
+    print("    所有回退策略均未成功返回初始页面")
     return False, False
 
 

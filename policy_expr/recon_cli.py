@@ -159,9 +159,9 @@ def run_app(app: str, depth: int = 0, sample: int = 0) -> None:
                                           sample=sample, parent_bytes=parent_bytes, re_nav=re_nav)
             
             # TODO: For deeper BFS, we may want to learn/knowledge after each page to improve return_to_initial success. But it slows down the process and may cause more API costs, so we can enable it later if needed.
-            # if not already_learned:
-            #     run_learn(out_dir / "recon_result.json")
-            #     run_knowledge(out_dir)
+            if not already_learned:
+                run_learn(out_dir / "recon_result.json")
+                run_knowledge(out_dir)
 
             # Save root context for returning
             if root_ctx is None:
