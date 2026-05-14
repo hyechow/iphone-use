@@ -10,3 +10,4 @@ bin/
 tmp_scripts/
 knowledge/*.png
 models/
+test.sh
