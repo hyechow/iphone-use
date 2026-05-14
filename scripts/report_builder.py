@@ -248,9 +248,10 @@ def _build_nav_tree(pages: list[ReconPageInfo], trace: list[dict] | None = None)
             if page_name not in node_map or not parent_name or parent_name not in node_map:
                 continue
             child = node_map[page_name]
-            child.via_tap = via_tap
             parent = node_map[parent_name]
-            if child not in parent.children:
+            # Only assign one parent per node to keep a proper tree (no cycles).
+            if page_name not in has_parent and child not in parent.children:
+                child.via_tap = via_tap
                 parent.children.append(child)
                 has_parent.add(page_name)
         # When BFS trace is available, only show BFS-explored pages in the tree.
@@ -294,16 +295,19 @@ def _build_nav_tree(pages: list[ReconPageInfo], trace: list[dict] | None = None)
     return [node_map[p.name] for p in pages if p.name not in has_parent]
 
 
-def _render_tree_html(nodes: list[NavNode]) -> str:
+def _render_tree_html(nodes: list[NavNode], _visited: frozenset[str] = frozenset()) -> str:
     if not nodes:
         return ""
     items = ""
     for node in nodes:
         if node.page is not None:
+            if node.page.name in _visited:
+                continue  # cycle guard
             type_label = PAGE_TYPE_LABELS.get(node.page.page_type, node.page.page_type)
             slug = _slug(node.page.name)
             badge = f'<span class="tree-chip">{type_label}</span>' if type_label else ''
-            sub = f'<ul>{_render_tree_html(node.children)}</ul>' if node.children else ''
+            child_visited = _visited | {node.page.name}
+            sub = f'<ul>{_render_tree_html(node.children, child_visited)}</ul>' if node.children else ''
             link_cls = "tree-link tree-link-error" if node.page.error else "tree-link"
             error_dot = '<span class="tree-error-dot">⚠</span>' if node.page.error else ''
             items += (
@@ -365,6 +369,17 @@ def _render_error_html(error: dict | None, annotated_url: str = "") -> str:
             score_str = f"{score:.3f}" if score is not None else ""
             score_html = f'<span class="back-score">{score_str}</span>' if score_str else ""
             success = a.get("success", False)
+            if strategy == "retry":
+                steps += (
+                    f'<div class="back-step back-step-retry">'
+                    f'<span class="back-num">↻</span>'
+                    f'<span class="back-strategy">retry</span>'
+                    f'<span class="back-coords"></span>'
+                    f'<span class="back-result">{result_text}</span>'
+                    f'{score_html}'
+                    f'</div>'
+                )
+                continue
             step_cls = "back-step back-step-ok" if success else "back-step"
             steps += (
                 f'<div class="{step_cls}">'
@@ -492,23 +507,37 @@ class ReconReportBuilder:
                         after_img = _load_img(tap_path)
                         after_ann = annotate_back_attempts_img(after_img, [back_attempts_raw[0]])
                         step2_src = _img_to_data_url(img_to_bytes(after_ann))
-                        step2_sub = f"回退策略: {back_attempts_raw[0].get('strategy', '')}"
+                        first_strategy = back_attempts_raw[0].get('strategy', '')
+                        step2_sub = "重新进入子页面" if first_strategy == "re_nav" else f"回退策略: {first_strategy}"
                     else:
                         step2_src = after_url
                         step2_sub = "已导航"
                     back_seq.append({"src": step2_src, "subtitle": step2_sub, "success": None})
-                    # Steps 3+: each back attempt that has a screenshot
+                    # Steps 3+: each back attempt (with screenshot, or retry markers)
                     for attempt in tap.get("back_attempts", []):
-                        shot = Path(attempt.get("screenshot", ""))
-                        if not shot.exists():
-                            continue
+                        strategy = attempt.get("strategy", "")
                         result_txt = attempt.get("result", "")
                         score = attempt.get("score")
                         score_str = f" {score:.3f}" if score is not None else ""
                         success = attempt.get("success", False)
+                        if strategy == "retry":
+                            back_seq.append({
+                                "src": back_seq[-1]["src"] if back_seq else "",
+                                "subtitle": f"↻ {result_txt}{score_str}",
+                                "success": None,
+                                "is_retry": True,
+                            })
+                            continue
+                        shot = Path(attempt.get("screenshot", ""))
+                        if not shot.exists():
+                            continue
+                        if strategy == "re_nav":
+                            subtitle = "已返回子页面"
+                        else:
+                            subtitle = f"{'匹配' if success else result_txt}{score_str}"
                         back_seq.append({
                             "src": _img_to_data_url(shot.read_bytes()),
-                            "subtitle": f"{'匹配' if success else result_txt}{score_str}",
+                            "subtitle": subtitle,
                             "success": success,
                         })
 
@@ -866,10 +895,13 @@ RECON_HTML_TEMPLATE = """\
     background: #fff7f7; border: 1px solid #fecaca;
   }}
   .back-step-ok {{ background: #f0fdf4; border-color: #bbf7d0; color: #166534; }}
+  .back-step-retry {{ background: #fff7ed; border-color: #fed7aa; color: #9a3412; }}
   .back-num {{ width: 18px; height: 18px; border-radius: 50%; background: #fecaca; color: #991b1b; font-weight: 700; font-size: 10px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }}
   .back-step-ok .back-num {{ background: #bbf7d0; color: #166534; }}
+  .back-step-retry .back-num {{ background: #fed7aa; color: #c2410c; font-size: 12px; }}
   .back-strategy {{ font-weight: 600; width: 70px; flex-shrink: 0; color: #991b1b; }}
   .back-step-ok .back-strategy {{ color: #166534; }}
+  .back-step-retry .back-strategy {{ color: #ea580c; }}
   .back-coords {{ color: #64748b; width: 72px; flex-shrink: 0; font-family: monospace; }}
   .back-result {{ flex: 1; color: #64748b; }}
   .back-score {{ font-family: monospace; color: #b91c1c; margin-left: auto; flex-shrink: 0; }}
@@ -992,16 +1024,19 @@ function openSeq(key) {{
     }}
     var panel = document.createElement('div');
     panel.className = 'modal-panel';
-    if (step.success === true) panel.style.borderColor = 'rgba(34,197,94,0.5)';
+    if (step.is_retry) panel.style.borderColor = 'rgba(251,146,60,0.6)';
+    else if (step.success === true) panel.style.borderColor = 'rgba(34,197,94,0.5)';
     else if (step.success === false) panel.style.borderColor = 'rgba(239,68,68,0.4)';
     var img = document.createElement('img');
     img.src = step.src;
     img.style.cursor = 'default';
+    if (step.is_retry) img.style.opacity = '0.35';
     var lbl = document.createElement('div');
     lbl.className = 'modal-label';
     lbl.style.whiteSpace = 'nowrap';
     lbl.textContent = '步骤 ' + (i + 1) + (step.subtitle ? ': ' + step.subtitle : '');
-    if (step.success === true) lbl.style.color = '#4ade80';
+    if (step.is_retry) lbl.style.color = '#fb923c';
+    else if (step.success === true) lbl.style.color = '#4ade80';
     else if (step.success === false) lbl.style.color = '#f87171';
     panel.appendChild(img);
     panel.appendChild(lbl);

@@ -9,11 +9,12 @@ from pathlib import Path
 
 @dataclass
 class BackAttempt:
-    strategy: str           # "fixed_1", "YOLO", "LLM", "LLM+YOLO"
-    result: str             # "匹配" | "不匹配" | "未变化" | "父页面"
+    strategy: str           # "fixed_1", "YOLO", "LLM", "LLM+YOLO", "retry"
+    result: str             # "匹配" | "不匹配" | "未变化" | "父页面" | "变深重试 (N/M)"
     score: float = 0.0
     coords: list[int] = field(default_factory=list)  # [x, y] logical coords
     success: bool = False
+    screenshot: str = ""    # path to screenshot after this attempt, or ""
 
 
 @dataclass
