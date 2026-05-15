@@ -29,6 +29,59 @@ def _get_comparator() -> PageComparator:
     return _comparator
 
 
+def _manual_recover(
+    client,
+    screenshot: Callable[[], bytes],
+    nav_stack: list[tuple[bytes, tuple[float, float] | None]],
+    top_level: int,
+    prompt: str = "",
+    max_attempts: int = 3,
+) -> bool:
+    """Prompt user to manually navigate back to initial page.
+
+    Returns True if the user successfully recovered, False if aborted.
+    """
+    comp = _get_comparator()
+    initial_bytes = nav_stack[top_level][0]
+
+    for attempt in range(1, max_attempts + 1):
+        print(f"\n  ⚠ {prompt}")
+        print(f"  请手动操作手机回到初始页，然后按回车继续 ({attempt}/{max_attempts})")
+        print(f"  （输入 q 放弃当前页面的探测）", end="", flush=True)
+        user_input = input()
+
+        if user_input.strip().lower() == "q":
+            print("  用户放弃，终止探测")
+            return False
+
+        current_bytes = screenshot()
+        sim = comp.raw_similarity(initial_bytes, current_bytes)
+        print(f"  当前截图与初始页相似度: {sim:.3f}")
+
+        if sim >= comp._no_change_threshold:
+            print(f"  ✓ 已回到初始页")
+            return True
+
+        # Also check if we matched any ancestor (could forward from there)
+        matched_level = _match_stack(comp, nav_stack, current_bytes)
+        if matched_level >= 0:
+            if matched_level == top_level:
+                print(f"  ✓ 已回到初始页")
+                return True
+            print(f"  匹配到祖先页 L{matched_level}，尝试自动 forward 回初始页...")
+            from policy_expr.recon.back_nav import _navigate_forward
+            _navigate_forward(client, nav_stack, matched_level, screenshot)
+            verify_bytes = screenshot()
+            verify_sim = comp.raw_similarity(initial_bytes, verify_bytes)
+            if verify_sim >= comp._no_change_threshold:
+                print(f"  ✓ forward 成功，已回到初始页 ({verify_sim:.3f})")
+                return True
+            print(f"  forward 后仍未到达初始页 ({verify_sim:.3f})")
+
+    print("  多次尝试未能回到初始页，终止探测")
+    return False
+
+
 def probe_elements(
     client,
     knowledge: PageKnowledge,
@@ -148,12 +201,17 @@ def probe_elements(
             result.taps[-1].back_attempts = back_log
             result.save(result_path)
             if not matched:
-                raise ProbeAbortedError(
-                    f"无法返回子页面（探测第 {i} 个元素「{area.label}」后），终止探测",
-                    failed_tap=i,
-                    failed_element=area.label,
-                    back_attempts=back_log,
+                recovered = _manual_recover(
+                    client, screenshot, nav_stack, top_level,
+                    prompt=f"点击「{area.label}」后无法自动返回初始页",
                 )
+                if not recovered:
+                    raise ProbeAbortedError(
+                        f"无法返回子页面（探测第 {i} 个元素「{area.label}」后），终止探测",
+                        failed_tap=i,
+                        failed_element=area.label,
+                        back_attempts=back_log,
+                    )
 
         result.save(result_path)
 
@@ -174,11 +232,16 @@ def probe_elements(
                 tap_index=0,
             )
             if not matched:
-                raise ProbeAbortedError(
-                    "探测完成后无法返回初始页面，终止",
-                    failed_tap=-1,
-                    failed_element="",
-                    back_attempts=back_log,
+                recovered = _manual_recover(
+                    client, screenshot, nav_stack, top_level,
+                    prompt="探测完成后无法自动返回初始页",
                 )
+                if not recovered:
+                    raise ProbeAbortedError(
+                        "探测完成后无法返回初始页面，终止",
+                        failed_tap=-1,
+                        failed_element="",
+                        back_attempts=back_log,
+                    )
 
     return result

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import io
 import json
 import re
@@ -39,9 +38,20 @@ def _font(size: int = FONT_SIZE):
         return ImageFont.load_default()
 
 
-def _img_to_data_url(png_bytes: bytes) -> str:
-    b64 = base64.b64encode(png_bytes).decode()
-    return f"data:image/png;base64,{b64}"
+_REPORT_MAX_W = 640  # resize annotated images to this width before saving
+
+
+def _save_report_img(src: "Image.Image | bytes", path: Path, quality: int = 75) -> None:
+    """Save an image as JPEG to disk, resizing to _REPORT_MAX_W if wider."""
+    if isinstance(src, bytes):
+        img = Image.open(io.BytesIO(src)).convert("RGB")
+    else:
+        img = src.convert("RGB")
+    w, h = img.size
+    if w > _REPORT_MAX_W:
+        img = img.resize((_REPORT_MAX_W, round(h * _REPORT_MAX_W / w)), Image.Resampling.LANCZOS)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(path, format="JPEG", quality=quality, optimize=True)
 
 
 def _load_img(path: Path) -> Image.Image:
@@ -487,12 +497,14 @@ class ReconReportBuilder:
                 if not description:
                     description = init_result.get("page", {}).get("description", "")
 
-            # Annotate screenshot with tap points (empty if probe aborted)
+            # Annotate screenshot with tap points, save to disk (not embedded in HTML).
             initial_img = _load_img(initial_path)
             raw_taps = result.get("taps", [])
             tap_points = [(t["x"], t["y"], t["index"], t.get("navigated", False)) for t in raw_taps]
             annotated_img = annotate_recon_taps(initial_img, tap_points)
-            annotated_url = _img_to_data_url(img_to_bytes(annotated_img))
+            ann_path = pd / "initial_tap_ann.jpg"
+            _save_report_img(annotated_img, ann_path)
+            annotated_url = str(ann_path.relative_to(log_dir))
 
             # Build ReconTap list
             taps: list[ReconTap] = []
@@ -502,21 +514,28 @@ class ReconReportBuilder:
                 if navigated:
                     total_navigated += 1
                 tap_path = Path(tap.get("screenshot", ""))
-                after_url = _img_to_data_url(tap_path.read_bytes()) if tap_path.is_file() else None
+                # Raw tap screenshot already on disk — just use a relative path.
+                after_url = str(tap_path.relative_to(log_dir)) if tap_path.is_file() else None
 
                 # Build full back-navigation sequence for navigated taps
                 back_seq: list[dict] = []
                 if navigated and after_url:
-                    # Step 1: initial page with single tap marker
-                    single_point = [(tap["x"], tap["y"], tap["index"], True)]
+                    tap_idx = tap["index"]
+                    tap_dir = pd / "tap"
+                    # Step 1: initial page with single tap marker (annotated, save to disk)
+                    single_point = [(tap["x"], tap["y"], tap_idx, True)]
                     before_img = annotate_recon_taps(initial_img.copy(), single_point)
-                    back_seq.append({"src": _img_to_data_url(img_to_bytes(before_img)), "subtitle": "", "success": None})
+                    seq0_path = tap_dir / f"tap_{tap_idx:02d}_seq0.jpg"
+                    _save_report_img(before_img, seq0_path)
+                    back_seq.append({"src": str(seq0_path.relative_to(log_dir)), "subtitle": "", "success": None})
                     # Step 2: navigated page, annotate with first back-attempt coords if available
                     back_attempts_raw = tap.get("back_attempts", [])
                     if back_attempts_raw and tap_path.is_file():
                         after_img = _load_img(tap_path)
                         after_ann = annotate_back_attempts_img(after_img, [back_attempts_raw[0]])
-                        step2_src = _img_to_data_url(img_to_bytes(after_ann))
+                        seq1_path = tap_dir / f"tap_{tap_idx:02d}_seq1.jpg"
+                        _save_report_img(after_ann, seq1_path)
+                        step2_src = str(seq1_path.relative_to(log_dir))
                         first_strategy = back_attempts_raw[0].get('strategy', '')
                         step2_sub = "重新进入子页面" if first_strategy == "forward" else f"回退策略: {first_strategy}"
                     else:
@@ -524,6 +543,9 @@ class ReconReportBuilder:
                         step2_sub = "已导航"
                     back_seq.append({"src": step2_src, "subtitle": step2_sub, "success": None})
                     # Steps 3+: each back attempt (with screenshot, or retry markers)
+                    # Forward steps without a screenshot are collapsed into one terminal
+                    # step at the end (they all land on the initial page anyway).
+                    pending_forward: list[dict] = []
                     for attempt in tap.get("back_attempts", []):
                         strategy = attempt.get("strategy", "")
                         result_txt = attempt.get("result", "")
@@ -540,15 +562,29 @@ class ReconReportBuilder:
                             continue
                         shot = Path(attempt.get("screenshot", ""))
                         if not shot.is_file():
+                            if strategy == "forward" and success:
+                                pending_forward.append(attempt)
                             continue
                         if strategy == "forward":
-                            subtitle = "已返回子页面"
+                            subtitle = f"{result_txt}（已恢复）"
                         else:
                             subtitle = f"{result_txt}{score_str}"
                         back_seq.append({
-                            "src": _img_to_data_url(shot.read_bytes()),
+                            "src": str(shot.relative_to(log_dir)),
                             "subtitle": subtitle,
                             "success": success,
+                        })
+
+                    # Collapse pending no-screenshot forward steps into one terminal step.
+                    # Extract the full path: "L0→L1", "L1→L2" → "L0→L1→L2"
+                    if pending_forward:
+                        steps = [a.get("result", "") for a in pending_forward]
+                        levels = [steps[0].split("→")[0]] + [s.split("→")[-1] for s in steps]
+                        path_str = "→".join(levels)
+                        back_seq.append({
+                            "src": str(initial_path.relative_to(log_dir)),
+                            "subtitle": f"{path_str}（已恢复）",
+                            "success": True,
                         })
 
                 taps.append(ReconTap(
@@ -602,7 +638,9 @@ class ReconReportBuilder:
                         shot_bytes = initial_path.read_bytes()
                     err_img = Image.open(io.BytesIO(shot_bytes)).convert("RGBA")
                     err_img = annotate_back_attempts_img(err_img, back_attempts)
-                    error_annotated_url = _img_to_data_url(img_to_bytes(err_img))
+                    err_ann_path = pd / "error_tap_ann.jpg"
+                    _save_report_img(err_img, err_ann_path)
+                    error_annotated_url = str(err_ann_path.relative_to(log_dir))
 
             pages.append(ReconPageInfo(
                 name=pd.name,
@@ -671,9 +709,11 @@ class RunnerReportBuilder:
             if ss_path.exists() and x is not None and y is not None:
                 img = _load_img(ss_path)
                 annotated_img = annotate_tap(img, [(x, y, idx)])
-                annotated_url = _img_to_data_url(img_to_bytes(annotated_img))
+                ann_path = run_dir / f"screenshot_turn_{idx}_ann.jpg"
+                _save_report_img(annotated_img, ann_path)
+                annotated_url = ann_path.name
             elif ss_path.exists():
-                annotated_url = _img_to_data_url(ss_path.read_bytes())
+                annotated_url = ss_path.name
             else:
                 annotated_url = ""
 
