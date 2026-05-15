@@ -194,6 +194,17 @@ def logical_xy(ax: float, ay: float) -> tuple[float, float]:
     return max(0, min(x, WIN_W - 1)), max(0, min(y, WIN_H_TAP_MAX))
 
 
+# Valid tap region on the phone screen (logical 0-1000 space).
+# Derived from mcp_frame_mask.png: corners, notch (top ~50px), and edges are frame/desktop.
+_TAP_X_MIN, _TAP_X_MAX = 30, 970
+_TAP_Y_MIN, _TAP_Y_MAX = 80, 980
+
+
+def is_valid_tap(ax: float, ay: float) -> bool:
+    """Check if normalized (0-1000) coordinates fall on the phone screen, not the frame/desktop."""
+    return _TAP_X_MIN <= ax <= _TAP_X_MAX and _TAP_Y_MIN <= ay <= _TAP_Y_MAX
+
+
 def _find_iphone_window() -> tuple[float, float] | None:
     """Return (x, y) screen origin of the 318x701 iPhone Mirroring window."""
     windows = CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID)

@@ -107,7 +107,7 @@ def annotate_recon_taps(
 LOGICAL_W = 318  # iPhone Mirroring logical pixel width (matches executor.WIN_W)
 
 STRATEGY_COLORS: dict[str, tuple[int, int, int]] = {
-    "fixed_1": (99, 102, 241),   # indigo
+    "fixed": (99, 102, 241),   # indigo
     "YOLO":    (234, 179,  8),   # amber
     "LLM":     (59, 130, 246),   # blue
     "LLM+YOLO":(139,  92, 246),  # violet
@@ -240,12 +240,22 @@ def _build_nav_tree(pages: list[ReconPageInfo], trace: list[dict] | None = None)
     has_parent: set[str] = set()
 
     if trace:
+        # Identify root pages (parent is None/missing) upfront so re-visits
+        # as children of other pages don't prevent them from being roots.
+        root_pages: set[str] = set()
+        for entry in trace:
+            if not entry.get("parent"):
+                root_pages.add(entry.get("page", ""))
+
         # Accurate: use recorded BFS parent-child relationships
         for entry in trace:
             page_name = entry.get("page", "")
             parent_name = entry.get("parent")
             via_tap = entry.get("via_tap")
             if page_name not in node_map or not parent_name or parent_name not in node_map:
+                continue
+            # Never assign a parent to a root page — it stays at the top of the tree.
+            if page_name in root_pages:
                 continue
             child = node_map[page_name]
             parent = node_map[parent_name]
@@ -492,7 +502,7 @@ class ReconReportBuilder:
                 if navigated:
                     total_navigated += 1
                 tap_path = Path(tap.get("screenshot", ""))
-                after_url = _img_to_data_url(tap_path.read_bytes()) if tap_path.exists() else None
+                after_url = _img_to_data_url(tap_path.read_bytes()) if tap_path.is_file() else None
 
                 # Build full back-navigation sequence for navigated taps
                 back_seq: list[dict] = []
@@ -503,12 +513,12 @@ class ReconReportBuilder:
                     back_seq.append({"src": _img_to_data_url(img_to_bytes(before_img)), "subtitle": "", "success": None})
                     # Step 2: navigated page, annotate with first back-attempt coords if available
                     back_attempts_raw = tap.get("back_attempts", [])
-                    if back_attempts_raw and tap_path.exists():
+                    if back_attempts_raw and tap_path.is_file():
                         after_img = _load_img(tap_path)
                         after_ann = annotate_back_attempts_img(after_img, [back_attempts_raw[0]])
                         step2_src = _img_to_data_url(img_to_bytes(after_ann))
                         first_strategy = back_attempts_raw[0].get('strategy', '')
-                        step2_sub = "重新进入子页面" if first_strategy == "re_nav" else f"回退策略: {first_strategy}"
+                        step2_sub = "重新进入子页面" if first_strategy == "forward" else f"回退策略: {first_strategy}"
                     else:
                         step2_src = after_url
                         step2_sub = "已导航"
@@ -529,12 +539,12 @@ class ReconReportBuilder:
                             })
                             continue
                         shot = Path(attempt.get("screenshot", ""))
-                        if not shot.exists():
+                        if not shot.is_file():
                             continue
-                        if strategy == "re_nav":
+                        if strategy == "forward":
                             subtitle = "已返回子页面"
                         else:
-                            subtitle = f"{'匹配' if success else result_txt}{score_str}"
+                            subtitle = f"{result_txt}{score_str}"
                         back_seq.append({
                             "src": _img_to_data_url(shot.read_bytes()),
                             "subtitle": subtitle,
@@ -585,7 +595,7 @@ class ReconReportBuilder:
                         for tap in raw_taps:
                             if tap.get("index") == failed_tap_idx:
                                 tp = Path(tap.get("screenshot", ""))
-                                if tp.exists():
+                                if tp.is_file():
                                     shot_bytes = tp.read_bytes()
                                 break
                     if shot_bytes is None:

@@ -16,7 +16,8 @@ load_dotenv()
 
 from policy_expr.executor import logical_xy
 from policy_expr.recon import PageParser, viz_result
-from policy_expr.recon.bfs import probe_elements, return_to_initial
+from policy_expr.recon.bfs import probe_elements
+from policy_expr.recon.back_nav import return_to_initial
 from policy_expr.recon.utils import ProbeAbortedError
 from policy_expr.trace import BfsTracer
 
@@ -84,7 +85,7 @@ def _parse_identity(phone) -> tuple:
 
 
 def _probe_page(phone, knowledge, png_bytes, out_dir: Path, sample: int = 0,
-                parent_bytes: bytes | None = None, re_nav: tuple[float, float] | None = None):
+                nav_stack: list | None = None):
     """Save initial screenshot + probe all elements. Returns (result, out_dir)."""
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -93,7 +94,7 @@ def _probe_page(phone, knowledge, png_bytes, out_dir: Path, sample: int = 0,
     viz_result(knowledge, png_bytes, "initial", out_dir)
 
     result = probe_elements(phone.client, knowledge, out_dir, img_path, phone.screenshot,
-                            sample=sample, parent_bytes=parent_bytes, re_nav=re_nav)
+                            sample=sample, nav_stack=nav_stack)
     result.save(out_dir / "recon_result.json")
 
     ok = sum(1 for t in result.taps if t.tap_ok and t.navigated)
@@ -130,27 +131,33 @@ def run_app(app: str, depth: int = 0, sample: int = 0) -> None:
         tracer = BfsTracer()
         trace_path = app_log_dir / "bfs_trace.json"
         chain_to_page: dict[tuple, str] = {}  # nav_chain_tuple → page_name
+        visited_pages: set[str] = set()       # page names seen in this BFS run
 
         while queue:
             cur_depth, nav_chain = queue.popleft()
 
             # Return to root then navigate to target
+            nav_stack: list[tuple[bytes, tuple[float, float] | None]] = []
             if root_ctx and nav_chain:
                 root_page, root_bytes, root_out = root_ctx
                 ok = return_to_initial(
                     phone.client, phone.screenshot,
-                    root_bytes,
-                    None,
+                    [(root_bytes, nav_chain[0][:2] if nav_chain else None)],
                 )[0]
                 if not ok:
                     print(f"\n  \033[31m✗ 返回根页面失败，跳过: {[l for _, _, l in nav_chain]}\033[0m")
                     continue
+                # Build nav_stack during navigation
+                nav_stack = [(root_bytes, nav_chain[0][:2] if len(nav_chain) > 0 else None)]
                 root_title = root_page.identity.page_title
                 path_desc = " → ".join([root_title] + [l for _, _, l in nav_chain])
                 print(f"\n\033[36m━━━ 页面跳转: {path_desc} ━━━\033[0m")
-                for lx, ly, label in nav_chain:
+                for step_i, (lx, ly, label) in enumerate(nav_chain):
                     phone.client.tap(lx, ly)
                     time.sleep(2.0)
+                    page_bytes = phone.screenshot()
+                    next_coords = nav_chain[step_i + 1][:2] if step_i + 1 < len(nav_chain) else None
+                    nav_stack.append((page_bytes, next_coords))
 
             # Explore current page
             png_bytes, knowledge, page_name = _parse_identity(phone)
@@ -162,20 +169,29 @@ def run_app(app: str, depth: int = 0, sample: int = 0) -> None:
             via_tap = nav_chain[-1][2] if nav_chain else None
             chain_to_page[chain_key] = page_name
 
-            # Record in trace immediately — before any operation that might fail
-            tracer.record_page(page_name, parent_page, via_tap, len(nav_chain))
-            tracer.save(trace_path)
+            # Only record in trace once per page — re-visits (e.g. BFS cycles back
+            # to root via a different path) must not overwrite the original entry or
+            # add a spurious child relationship that breaks report rendering.
+            if page_name not in visited_pages:
+                visited_pages.add(page_name)
+                tracer.record_page(page_name, parent_page, via_tap, len(nav_chain))
+                tracer.save(trace_path)
+            else:
+                print(f"  已访问，跳过记录: {page_name}")
+                continue
 
             already_learned = _check_knowledge_exists(app, signature)
             if already_learned and cur_depth <= 0:
                 print(f"  已学习过，跳过: {already_learned}")
                 continue
 
-            parent_bytes = root_ctx[1] if root_ctx else None
-            re_nav = nav_chain[-1][:2] if nav_chain else None
+            # Build nav_stack for root page (no nav_chain)
+            if not nav_stack:
+                nav_stack = [(png_bytes, None)]
+
             try:
                 result, out_dir = _probe_page(phone, knowledge, png_bytes, app_log_dir / page_name,
-                                              sample=sample, parent_bytes=parent_bytes, re_nav=re_nav)
+                                              sample=sample, nav_stack=nav_stack)
             except ProbeAbortedError as e:
                 tracer.record_error(page_name, e)
                 tracer.save(trace_path)

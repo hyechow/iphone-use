@@ -10,7 +10,7 @@ from pathlib import Path
 @dataclass
 class BackAttempt:
     strategy: str           # "fixed_1", "YOLO", "LLM", "LLM+YOLO", "retry"
-    result: str             # "匹配" | "不匹配" | "未变化" | "父页面" | "变深重试 (N/M)"
+    result: str             # "initial" | "L0" | "L1" | "未知页" | "未变化" | "forward"
     score: float = 0.0
     coords: list[int] = field(default_factory=list)  # [x, y] logical coords
     success: bool = False

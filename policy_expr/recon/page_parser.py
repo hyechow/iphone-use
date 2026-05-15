@@ -102,6 +102,7 @@ class InteractiveArea(BaseModel):
     target_page: str = Field(description="目标页面名称")
     description: str = Field(description="简要描述")
     center_xy: list[float] = Field(description="可交互区中心坐标 [x, y]，0-1000")
+    element_type: str = ""  # dominant type from underlying elements (e.g. "back_button", "tab")
 
 
 class PageKnowledge(BaseModel):
@@ -186,6 +187,7 @@ def classify_elements(page: ParsedPage) -> list[InteractiveArea]:
             target_page=rep.leads_to or "",
             description=rep.leads_to or "",
             center_xy=[round(rep.x, 1), round(rep.y, 1)],
+            element_type=rep.element_type,
         ))
 
     areas.sort(key=lambda a: a.center_xy[1])
