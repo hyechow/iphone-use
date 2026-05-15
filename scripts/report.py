@@ -15,7 +15,7 @@ def main():
     sub = parser.add_subparsers(dest="mode", required=True)
 
     # Recon mode
-    p_recon = sub.add_parser("recon", help="BFS recon report")
+    p_recon = sub.add_parser("recon", help="Page exploration report")
     p_recon.add_argument("--app", required=True, help="App name under logs/recon/")
     p_recon.add_argument("--page", default=None, help="Specific page name (default: all pages)")
 

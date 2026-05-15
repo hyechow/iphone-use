@@ -1,4 +1,4 @@
-"""BFS exploration trace: records page visits, navigation structure, and back-navigation attempts."""
+"""Page exploration trace: records page visits, navigation structure, and back-navigation attempts."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ class ProbeError:
 
 
 @dataclass
-class BfsEntry:
+class Entry:
     page: str
     parent: str | None
     via_tap: str | None
@@ -34,16 +34,16 @@ class BfsEntry:
     error: ProbeError | None = None
 
 
-class BfsTracer:
-    """Accumulates BFS exploration entries and persists them incrementally to disk."""
+class Tracer:
+    """Accumulates page exploration entries and persists them incrementally to disk."""
 
     def __init__(self) -> None:
-        self._entries: list[BfsEntry] = []
+        self._entries: list[Entry] = []
         self._page_index: dict[str, int] = {}
 
     def record_page(self, page: str, parent: str | None, via_tap: str | None, depth: int) -> None:
-        """Record that BFS has started exploring a page."""
-        entry = BfsEntry(page=page, parent=parent, via_tap=via_tap, depth=depth)
+        """Record that exploration has started exploring a page."""
+        entry = Entry(page=page, parent=parent, via_tap=via_tap, depth=depth)
         self._page_index[page] = len(self._entries)
         self._entries.append(entry)
 
@@ -64,7 +64,7 @@ class BfsTracer:
             self._entries[idx].error = ProbeError(message=str(exc))
 
     @property
-    def entries(self) -> list[BfsEntry]:
+    def entries(self) -> list[Entry]:
         return list(self._entries)
 
     def save(self, path: Path) -> None:
@@ -87,7 +87,7 @@ class BfsTracer:
         return result
 
     @classmethod
-    def load(cls, path: Path) -> "BfsTracer":
+    def load(cls, path: Path) -> "Tracer":
         tracer = cls()
         if not path.exists():
             return tracer
@@ -107,7 +107,7 @@ class BfsTracer:
                         failed_element=raw_err.get("failed_element", ""),
                         back_attempts=[BackAttempt(**a) for a in raw_err.get("back_attempts", [])],
                     )
-            tracer._entries.append(BfsEntry(
+            tracer._entries.append(Entry(
                 page=page,
                 parent=d.get("parent"),
                 via_tap=d.get("via_tap"),

@@ -233,7 +233,7 @@ class AppReconData:
     app_name: str
     pages: list[ReconPageInfo] = field(default_factory=list)
     stats: dict = field(default_factory=dict)
-    bfs_trace: list[dict] | None = None  # from bfs_trace.json if available
+    trace: list[dict] | None = None  # from trace.json if available
 
 
 @dataclass
@@ -245,7 +245,7 @@ class NavNode:
 
 
 def _build_nav_tree(pages: list[ReconPageInfo], trace: list[dict] | None = None) -> list[NavNode]:
-    """Build navigation tree. Uses bfs_trace if available, otherwise infers from flows."""
+    """Build navigation tree. Uses trace if available, otherwise infers from flows."""
     node_map: dict[str, NavNode] = {p.name: NavNode(name=p.name, page=p) for p in pages}
     has_parent: set[str] = set()
 
@@ -332,7 +332,7 @@ def _render_tree_html(nodes: list[NavNode], _visited: frozenset[str] = frozenset
             error_dot = '<span class="tree-error-dot">⚠</span>' if node.page.error else ''
             items += (
                 f'<li class="tree-node">'
-                f'<a class="{link_cls}" href="#{slug}">{error_dot}{node.page.name}{badge}</a>'
+                f'<a class="{link_cls}" href="#{slug}">{error_dot}{node.page.title}{badge}</a>'
                 f'{sub}</li>'
             )
         else:
@@ -454,16 +454,16 @@ class ReconReportBuilder:
         total_taps = 0
         total_navigated = 0
 
-        # Load bfs_trace.json early (needed for error lookup during page iteration)
-        bfs_trace: list[dict] | None = None
-        trace_path = log_dir / "bfs_trace.json"
+        # Load trace.json early (needed for error lookup during page iteration)
+        trace_data: list[dict] | None = None
+        trace_path = log_dir / "trace.json"
         if trace_path.exists():
-            bfs_trace = json.loads(trace_path.read_text(encoding="utf-8"))
+            trace_data = json.loads(trace_path.read_text(encoding="utf-8"))
 
-        # Index bfs_trace errors by page name for quick lookup
+        # Index trace errors by page name for quick lookup
         trace_errors: dict[str, str] = {}
-        if bfs_trace:
-            for entry in bfs_trace:
+        if trace_data:
+            for entry in trace_data:
                 if entry.get("error"):
                     trace_errors[entry["page"]] = entry["error"]
 
@@ -666,7 +666,7 @@ class ReconReportBuilder:
                 "navigated": total_navigated,
                 "no_change": total_taps - total_navigated,
             },
-            bfs_trace=bfs_trace,
+            trace=trace_data,
         )
         return data
 
@@ -1255,7 +1255,7 @@ def _render_page_card_html(node: NavNode, path: list[str]) -> str:
 
 
 def generate_recon_html(data: AppReconData) -> str:
-    roots = _build_nav_tree(data.pages, trace=data.bfs_trace)
+    roots = _build_nav_tree(data.pages, trace=data.trace)
     tree_html = _render_tree_html(roots)
     sidebar_items = f'<ul class="nav-tree">{tree_html}</ul>'
 

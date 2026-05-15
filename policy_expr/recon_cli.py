@@ -14,12 +14,8 @@ from PIL import Image
 
 load_dotenv()
 
-from policy_expr.executor import logical_xy
 from policy_expr.recon import PageParser, viz_result
 from policy_expr.recon.bfs import probe_elements
-from policy_expr.recon.back_nav import return_to_initial
-from policy_expr.recon.utils import ProbeAbortedError
-from policy_expr.trace import BfsTracer
 
 ROOT = Path(__file__).parent.parent
 LOG_ROOT = ROOT / "logs" / "recon"
@@ -106,122 +102,48 @@ def _probe_page(phone, knowledge, png_bytes, out_dir: Path, sample: int = 0,
 # ── Commands ─────────────────────────────────────────────
 
 def run_app(app: str, depth: int = 0, sample: int = 0) -> None:
-    """Online recon with BFS depth control.
+    """Online recon with DFS depth control.
 
     depth=0: explore current page only.
-    depth=N: BFS explore discovered target pages (up to N levels deep).
-
-    Queue stores navigation chains: each item is (depth, nav_chain) where
-    nav_chain is a list of (lx, ly, label) taps from root to target page.
+    depth=N: DFS explore discovered pages (up to N levels deep).
+    Knowledge is generated bottom-up after all pages are explored.
     """
-    import time
-    from collections import deque
-
     from policy_expr.perception import LivePhoneSession
+    from policy_expr.recon.dfs import explore_dfs, generate_knowledge_postorder
 
     print(f"应用侦察: {app} (depth={depth}, sample={sample})")
-
     app_log_dir = LOG_ROOT / app
 
+    # Preload GUIClip model to avoid loading it during exploration
+    print("预加载 GUIClip 模型...")
+    from policy_expr.recon.back_nav import _get_identity_comp
+    import io
+    from PIL import Image
+
+    # Create a dummy 1x1 white image to trigger model loading
+    dummy_img = io.BytesIO()
+    Image.new('RGB', (1, 1), color='white').save(dummy_img, format='PNG')
+    dummy_bytes = dummy_img.getvalue()
+
+    # Call similarity once to trigger model loading
+    comp = _get_identity_comp()
+    comp.raw_similarity(dummy_bytes, dummy_bytes)  # This will trigger _ensure_loaded()
+
     with LivePhoneSession() as phone:
-        # nav_chain: taps from root to target, [] = root page
-        queue: deque[tuple[int, list]] = deque([(depth, [])])
-        root_ctx = None  # (page, initial_bytes, out_dir) for return_to_initial
+        # Phase 1: DFS exploration (probe only, no knowledge gen)
+        tree = explore_dfs(phone, app_log_dir, max_depth=depth, sample=sample)
 
-        tracer = BfsTracer()
-        trace_path = app_log_dir / "bfs_trace.json"
-        chain_to_page: dict[tuple, str] = {}  # nav_chain_tuple → page_name
-        visited_pages: set[str] = set()       # page names seen in this BFS run
+        # Phase 2: Post-order knowledge generation (leaves first) — DISABLED
+        # total = sum(1 + _count_tree_nodes(n.children) for n in tree)
+        # if total > 0:
+        #     print(f"\n--- 开始知识生成 (自底向上, {total} 个页面) ---")
+        #     generate_knowledge_postorder(tree, app)
+        #     print("知识生成完成")
 
-        while queue:
-            cur_depth, nav_chain = queue.popleft()
 
-            # Return to root then navigate to target
-            nav_stack: list[tuple[bytes, tuple[float, float] | None]] = []
-            if root_ctx and nav_chain:
-                root_page, root_bytes, root_out = root_ctx
-                ok = return_to_initial(
-                    phone.client, phone.screenshot,
-                    [(root_bytes, nav_chain[0][:2] if nav_chain else None)],
-                )[0]
-                if not ok:
-                    print(f"\n  \033[31m✗ 返回根页面失败，跳过: {[l for _, _, l in nav_chain]}\033[0m")
-                    continue
-                # Build nav_stack during navigation
-                nav_stack = [(root_bytes, nav_chain[0][:2] if len(nav_chain) > 0 else None)]
-                root_title = root_page.identity.page_title
-                path_desc = " → ".join([root_title] + [l for _, _, l in nav_chain])
-                print(f"\n\033[36m━━━ 页面跳转: {path_desc} ━━━\033[0m")
-                for step_i, (lx, ly, label) in enumerate(nav_chain):
-                    phone.client.tap(lx, ly)
-                    time.sleep(2.0)
-                    page_bytes = phone.screenshot()
-                    next_coords = nav_chain[step_i + 1][:2] if step_i + 1 < len(nav_chain) else None
-                    nav_stack.append((page_bytes, next_coords))
-
-            # Explore current page
-            png_bytes, knowledge, page_name = _parse_identity(phone)
-            signature = knowledge.page.identity.signature
-
-            # Derive parent info from nav_chain before any early-continue
-            chain_key = tuple((lx, ly, label) for lx, ly, label in nav_chain)
-            parent_page = chain_to_page.get(chain_key[:-1]) if chain_key else None
-            via_tap = nav_chain[-1][2] if nav_chain else None
-            chain_to_page[chain_key] = page_name
-
-            # Only record in trace once per page — re-visits (e.g. BFS cycles back
-            # to root via a different path) must not overwrite the original entry or
-            # add a spurious child relationship that breaks report rendering.
-            if page_name not in visited_pages:
-                visited_pages.add(page_name)
-                tracer.record_page(page_name, parent_page, via_tap, len(nav_chain))
-                tracer.save(trace_path)
-            else:
-                print(f"  已访问，跳过记录: {page_name}")
-                continue
-
-            already_learned = _check_knowledge_exists(app, signature)
-            if already_learned and cur_depth <= 0:
-                print(f"  已学习过，跳过: {already_learned}")
-                continue
-
-            # Build nav_stack for root page (no nav_chain)
-            if not nav_stack:
-                nav_stack = [(png_bytes, None)]
-
-            try:
-                result, out_dir = _probe_page(phone, knowledge, png_bytes, app_log_dir / page_name,
-                                              sample=sample, nav_stack=nav_stack)
-            except ProbeAbortedError as e:
-                tracer.record_error(page_name, e)
-                tracer.save(trace_path)
-                raise
-            except Exception as e:
-                tracer.record_error(page_name, e)
-                tracer.save(trace_path)
-                raise
-
-            # TODO: For deeper BFS, we may want to learn/knowledge after each page to improve return_to_initial success. But it slows down the process and may cause more API costs, so we can enable it later if needed.
-            if not already_learned:
-                run_learn(out_dir / "recon_result.json")
-                run_knowledge(out_dir)
-
-            if root_ctx is None:
-                root_ctx = (knowledge.page, (out_dir / "initial.png").read_bytes(), out_dir)
-
-            if cur_depth <= 0:
-                continue
-
-            n_children = sum(1 for t in result.taps if t.tap_ok and t.navigated)
-            if n_children:
-                input(f"  发现 {n_children} 个可导航子页面，按回车继续探索...")
-
-            for tap in result.taps:
-                if not tap.tap_ok or not tap.navigated:
-                    continue
-
-                lx, ly = logical_xy(tap.x, tap.y)
-                queue.append((cur_depth - 1, nav_chain + [(lx, ly, tap.label)]))
+def _count_tree_nodes(nodes) -> int:
+    from policy_expr.recon.dfs import _count_nodes
+    return _count_nodes(nodes)
 
 
 def run_parse(paths: list[Path]) -> None:
@@ -305,7 +227,7 @@ def run_knowledge(recon_dir: Path) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description="App Recon: 页面结构分析与自学习")
     ap.add_argument("--app", type=str, metavar="NAME", help="在线侦察指定应用，自动完成 recon→learn→knowledge")
-    ap.add_argument("--depth", type=int, default=0, metavar="N", help="BFS 探索深度，0=仅当前页面 (默认)")
+    ap.add_argument("--depth", type=int, default=0, metavar="N", help="DFS 探索深度，0=仅当前页面 (默认)")
     ap.add_argument("--sample", type=int, default=0, metavar="N", help="每个页面随机采样 N 个元素探测，0=全部 (默认)")
     ap.add_argument("--debug-parse", nargs="*", type=Path, metavar="PATH", help="[调试] 解析图片，无参数则在线截图")
     ap.add_argument("--debug-learn", type=Path, metavar="JSON", help="[调试] 从侦察结果生成功能流程描述")

@@ -23,18 +23,23 @@ from policy_expr.recon.page_compare import PageComparator, make_comparator
 # ---------------------------------------------------------------------------
 
 BACK_TAP_CENTER = (70.0, 125.0)
-BACK_TAP_MAX_DIST = 80.0
+BACK_TAP_MAX_DIST = 150.0
 BACK_SETTLE_SECONDS = 1.5
 
-# Module-level comparator (lazy, edge IoU by default)
-_comparator: PageComparator | None = None
+# Two comparators with different responsibilities:
+# - _change_comp: edge IoU — fast no_change detection inside _try_tap
+# - _identity_comp: GUIClip — semantic page identity for _match_stack and page_records
+# Preload GUIClip at module import time to avoid loading it during exploration
+_change_comp: PageComparator = make_comparator("edge_iou")
+_identity_comp: PageComparator = make_comparator("guiclip")  # Triggers GUIClip model loading
 
 
-def _get_comparator() -> PageComparator:
-    global _comparator
-    if _comparator is None:
-        _comparator = make_comparator()
-    return _comparator
+def _get_change_comp() -> PageComparator:
+    return _change_comp
+
+
+def _get_identity_comp() -> PageComparator:
+    return _identity_comp
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +164,7 @@ def infer_back_action(before_png: bytes, after_png: bytes | None, nav_context: s
     action = invoke_structured(llm, messages, BackAction)
     if not action.can_go_back:
         return None
-    if not (0 <= action.back_x <= 1000 and 0 <= action.back_y <= 1000):
+    if not is_valid_tap(action.back_x, action.back_y):
         return None
     return action
 
@@ -258,7 +263,7 @@ def _try_tap(
     time.sleep(BACK_SETTLE_SECONDS)
     after_bytes = screenshot()
 
-    comp = _get_comparator()
+    comp = _get_change_comp()
     if before_bytes and after_bytes:
         unchanged, score = comp.no_change_score(before_bytes, after_bytes)
         if unchanged:
@@ -284,30 +289,38 @@ def _execute_tap_tiers(
     out_dir: Path | None,
     tap_index: int,
     log: list[dict],
-    skip_yolo: bool = False,
+    skip_mechanical: bool = False,
 ) -> tuple[float, float, bytes] | None:
     """Try Tier 1→2→3→4 until one produces a page change.
 
     Each tier only cares: did the tap work (page changed)?
     Navigation assessment is handled by the caller.
-    skip_yolo: skip YOLO-based tiers (2, 4) when primary tiers (1, 3) already work.
+    Tiers group into two families:
+      mechanical (Tier 1+2): fixed position + YOLO calibration — same back-button region
+      llm (Tier 3+4): LLM inference + optional YOLO position correction
+    skip_mechanical: skip the mechanical family entirely, go straight to LLM.
     """
     from policy_expr.executor import logical_xy
 
-    # ── Tier 1: Fixed-position back tap ──
-    save_path = back_shot_path(out_dir, tap_index, len(log) + 1)
-    result = _try_tap(
-        client, screenshot, before_bytes, "fixed",
-        lambda: tap_back(client), log, save_path,
-    )
-    if result is not None:
-        return result
-
-    # ── Tier 2: YOLO icon detection (skip if primary tiers work) ──
     yolo_point = None
     lx, ly = 0.0, 0.0
-    current_bytes = screenshot()
-    if not skip_yolo:
+    # current_bytes is used for LLM; updated after each tap attempt
+    # original_bytes is the screenshot before any tapping, used for YOLO calibration
+    current_bytes: bytes = before_bytes or initial_bytes
+    original_bytes: bytes = current_bytes  # Keep original for YOLO calibration
+
+    if not skip_mechanical:
+        # ── Tier 1: Fixed-position back tap ──
+        save_path = back_shot_path(out_dir, tap_index, len(log) + 1)
+        result = _try_tap(
+            client, screenshot, before_bytes, "fixed",
+            lambda: tap_back(client), log, save_path,
+        )
+        if result is not None:
+            return result
+
+        # ── Tier 2: YOLO calibration (only when Tier 1 fails) ──
+        current_bytes = screenshot()
         yolo_point = _yolo_detect(current_bytes)
         if yolo_point is not None:
             lx, ly = logical_xy(*yolo_point)
@@ -319,7 +332,6 @@ def _execute_tap_tiers(
             if result is not None:
                 return result
         else:
-            print("    [YOLO] 搜索范围内无图标")
             log.append({"strategy": "YOLO", "result": "搜索范围内无图标",
                         "success": False, "screenshot": ""})
 
@@ -346,19 +358,37 @@ def _execute_tap_tiers(
         log.append({"strategy": "LLM", "coords": [round(bx), round(by)],
                     "result": "未变化", "success": False, "screenshot": ""})
 
-        # ── Tier 4: LLM + YOLO (skip if primary tiers work) ──
-        if not skip_yolo and yolo_point is not None:
-            save_path = back_shot_path(out_dir, tap_index, len(log) + 1)
-            result = _try_tap(
-                client, screenshot, before_bytes, "LLM+YOLO",
-                lambda: (client.tap(lx, ly), (lx, ly))[1], log, save_path,
-            )
-            if result is not None:
-                return result
-        elif not skip_yolo:
-            print("    [LLM+YOLO] 无YOLO检测结果可用于校正")
-            log.append({"strategy": "LLM+YOLO", "result": "无YOLO检测结果",
+    # ── Tier 4: LLM + YOLO ──
+    # Calibrate LLM output by finding nearest icon to LLM coordinates
+    if llm_action is not None:
+        from policy_expr.recon.yolo_calibrator import YoloCalibrator
+        # Use original_bytes for YOLO calibration to ensure we're on the right page
+        cal = YoloCalibrator.from_png(original_bytes)
+        if cal is not None:
+            calibrated_point = cal.nearest(llm_action.back_x, llm_action.back_y, max_dist=100.0)
+            if calibrated_point is not None:
+                cx, cy = calibrated_point
+                lx, ly = logical_xy(cx, cy)
+                save_path = back_shot_path(out_dir, tap_index, len(log) + 1)
+                result = _try_tap(
+                    client, screenshot, before_bytes, "LLM+YOLO",
+                    lambda: (client.tap(lx, ly), (lx, ly))[1], log, save_path,
+                )
+                if result is not None:
+                    return result
+            else:
+                print(f"    [LLM+YOLO] LLM坐标({llm_action.back_x:.0f},{llm_action.back_y:.0f})附近无YOLO检测结果")
+                log.append({"strategy": "LLM+YOLO",
+                            "result": f"LLM坐标附近无检测结果",
+                            "success": False, "screenshot": ""})
+        else:
+            print("    [LLM+YOLO] YOLO检测失败")
+            log.append({"strategy": "LLM+YOLO", "result": "YOLO检测失败",
                         "success": False, "screenshot": ""})
+    else:
+        print("    [LLM+YOLO] 无LLM输出可供校正")
+        log.append({"strategy": "LLM+YOLO", "result": "无LLM输出",
+                    "success": False, "screenshot": ""})
 
     return None
 
@@ -371,41 +401,84 @@ def return_to_initial(
     out_dir: Path | None = None,
     tap_index: int = 0,
     nav_context: str = "",
+    page_records: list[tuple[bytes, set[str]]] | None = None,
 ) -> tuple[bool, list[dict]]:
     """Navigate back to the initial page (top of nav_stack).
 
     Architecture: two-phase loop.
-      Phase 1 (_execute_tap_tiers): try four tap strategies, only care "did tap work?"
+      Phase 1 (_execute_tap_tiers): try tier families until one produces a page change.
       Phase 2 (this function): assess "where are we now?" via stack matching.
-      If unknown page → loop back to Phase 1.
+      Unknown page → track per-page tier history, loop back to Phase 1.
+
+    page_records maps each visited page (identified via GUIClip) to the set of tier
+    families already tried from it: "mechanical" (Tier 1+2) and/or "llm" (Tier 3+4).
+    When both families are exhausted for the current page, we give up.
+
+    Pass page_records from previous calls to preserve strategy memory across
+    multiple return_to_initial invocations (e.g., when exploring child pages in DFS).
     """
     log: list[dict] = []
-    comp = _get_comparator()
+    id_comp = _get_identity_comp()
     top_level = len(nav_stack) - 1
     initial_bytes = nav_stack[top_level][0]
-    max_rounds = 4
-    primary_worked: set[str] = set()  # track which primary tiers ("fixed", "LLM") produced changes
+    max_rounds = 6
+
+    # Per-page tier attempt history: list of (page_screenshot, tried_families).
+    # GUIClip is used for page matching so structurally-similar but content-different
+    # pages (e.g. 个人资料 vs 我的页面) are correctly distinguished.
+    # If page_records is provided, reuse it to preserve strategy memory across calls.
+    if page_records is None:
+        page_records = []
+
+    def _get_tried(current_bytes: bytes) -> set[str]:
+        """Return the tried-families set for current page, creating entry if new."""
+        for page_bytes, tried in page_records:
+            if id_comp.is_same_page(page_bytes, current_bytes).matched:
+                return tried
+        tried: set[str] = set()
+        page_records.append((current_bytes, tried))
+        return tried
+
+    current_bytes = before_back_bytes or initial_bytes
 
     for _ in range(max_rounds):
-        # Skip YOLO tiers if both primary tiers already proved they can tap
-        skip_yolo = "fixed" in primary_worked and "LLM" in primary_worked
+        tried = _get_tried(current_bytes)
 
-        # Phase 1: try tap tiers until one produces a page change
+        if "mechanical" in tried and "llm" in tried:
+            print("    [nav] 当前页面所有策略均已尝试，放弃")
+            break
+
+        skip_mechanical = "mechanical" in tried
+        if skip_mechanical:
+            print("    [nav] 当前页面已试过机械回退，直接调用 LLM")
+
+        prev_log_len = len(log)
+
+        # Phase 1: try tier families until one produces a page change
         tap_result = _execute_tap_tiers(
-            client, screenshot, before_back_bytes, initial_bytes,
+            client, screenshot, current_bytes, initial_bytes,
             nav_context, out_dir, tap_index, log,
-            skip_yolo=skip_yolo,
+            skip_mechanical=skip_mechanical,
         )
+
+        # Record which families were executed in this call
+        for entry in log[prev_log_len:]:
+            s = entry.get("strategy", "")
+            if s in ("fixed", "YOLO"):
+                tried.add("mechanical")
+            elif s in ("LLM", "LLM+YOLO"):
+                tried.add("llm")
+
         if tap_result is None:
-            break  # all tiers exhausted
+            break  # all remaining tiers for this page exhausted
 
         _, _, back_bytes = tap_result
 
         # Phase 2: assess where we ended up
-        matched_level = _match_stack(comp, nav_stack, back_bytes)
+        matched_level = _match_stack(id_comp, nav_stack, back_bytes)
         if matched_level >= 0:
             is_initial = matched_level == top_level
-            sim = comp.raw_similarity(nav_stack[matched_level][0], back_bytes)
+            sim = id_comp.raw_similarity(nav_stack[matched_level][0], back_bytes)
             level_desc = "initial" if is_initial else f"L{matched_level}"
             print(f"    → 匹配 {level_desc} ({sim:.3f})")
             if log:
@@ -418,18 +491,46 @@ def return_to_initial(
                                   log=log, tap_index=tap_index, out_dir=out_dir)
             return True, log
 
-        # Unknown page → record primary tier, update before_bytes and loop back
-        sim_to_initial = comp.raw_similarity(initial_bytes, back_bytes)
-        print(f"    → 未知页 ({sim_to_initial:.3f})")
+        # Unknown page — check if it's a parallel page
+        sim_to_initial = id_comp.raw_similarity(initial_bytes, back_bytes)
+
+        # Calculate max similarity with all nav_stack pages
+        max_sim = 0.0
+        for page_bytes, _ in nav_stack:
+            sim = id_comp.raw_similarity(page_bytes, back_bytes)
+            max_sim = max(max_sim, sim)
+
+        print(f"    → 未知页 (与initial: {sim_to_initial:.3f}, 与stack最大: {max_sim:.3f})")
         if log:
-            strategy = log[-1].get("strategy", "")
-            if strategy.startswith("fixed"):
-                primary_worked.add("fixed")
-            elif strategy in ("LLM", "LLM+YOLO"):
-                primary_worked.add("LLM")
-            log[-1]["result"] = f"未知页 ({sim_to_initial:.3f})"
+            log[-1]["result"] = f"未知页 (initial: {sim_to_initial:.3f}, stack_max: {max_sim:.3f})"
             log[-1]["score"] = round(sim_to_initial, 3)
-        before_back_bytes = back_bytes
+
+        # Parallel page detection: if low similarity with all stack pages, tap bottom tab
+        if max_sim < 0.75:
+            print(f"    [平行页] 检测为平行页面 (最大相似度 {max_sim:.3f} < 0.75)")
+            # Try tapping bottom tab to return to common ancestor
+            from policy_expr.executor import logical_xy
+            tap_x, tap_y = logical_xy(500.0, 950.0)  # Approximate bottom tab center
+            client.tap(tap_x, tap_y)
+            time.sleep(BACK_SETTLE_SECONDS)
+            after_tab_bytes = screenshot()
+
+            # Check if tapping bottom tab helped
+            tab_match = _match_stack(id_comp, nav_stack, after_tab_bytes)
+            if tab_match >= 0:
+                print(f"    [平行页] bottom_tab后匹配到 L{tab_match}")
+                if log:
+                    log.append({"strategy": "bottom_tab", "coords": [round(tap_x), round(tap_y)],
+                                "result": f"L{tab_match}", "success": True, "screenshot": ""})
+                current_bytes = after_tab_bytes
+                continue  # Try normal back navigation from this new page
+            else:
+                print(f"    [平行页] bottom_tab后仍未匹配到stack")
+                if log:
+                    log.append({"strategy": "bottom_tab", "coords": [round(tap_x), round(tap_y)],
+                                "result": "未知页", "success": False, "screenshot": ""})
+
+        current_bytes = back_bytes
 
     print("    所有回退策略均未成功返回初始页面")
     return False, log
