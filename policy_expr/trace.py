@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field, asdict
+from datetime import datetime
 from pathlib import Path
 
 
@@ -31,7 +32,18 @@ class Entry:
     parent: str | None
     via_tap: str | None
     depth: int
+    timestamp: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%dT%H:%M:%S"))
     error: ProbeError | None = None
+
+
+@dataclass
+class Transition:
+    src: str        # 来源页面名
+    tap: str        # 触发跳转的元素标签
+    dst: str        # 目标页面名
+    # "entered"=进入探测 | "depth_limit"=仅记录 | "skipped_visited"=已访问跳过 | "skipped_known"=已学跳过
+    status: str
+    timestamp: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%dT%H:%M:%S"))
 
 
 class Tracer:
@@ -40,6 +52,7 @@ class Tracer:
     def __init__(self) -> None:
         self._entries: list[Entry] = []
         self._page_index: dict[str, int] = {}
+        self._transitions: list[Transition] = []
 
     def record_page(self, page: str, parent: str | None, via_tap: str | None, depth: int) -> None:
         """Record that exploration has started exploring a page."""
@@ -63,18 +76,29 @@ class Tracer:
         else:
             self._entries[idx].error = ProbeError(message=str(exc))
 
+    def record_transition(self, src: str, tap: str, dst: str, status: str) -> None:
+        self._transitions.append(Transition(src=src, tap=tap, dst=dst, status=status))
+
     @property
     def entries(self) -> list[Entry]:
         return list(self._entries)
 
+    @property
+    def transitions(self) -> list[Transition]:
+        return list(self._transitions)
+
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self._to_list(), ensure_ascii=False, indent=2), encoding="utf-8")
+        data = {
+            "pages": self._to_list(),
+            "transitions": [asdict(t) for t in self._transitions],
+        }
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _to_list(self) -> list[dict]:
         result = []
         for e in self._entries:
-            d: dict = {"page": e.page, "parent": e.parent, "via_tap": e.via_tap, "depth": e.depth}
+            d: dict = {"page": e.page, "parent": e.parent, "via_tap": e.via_tap, "depth": e.depth, "timestamp": e.timestamp}
             if e.error:
                 err = e.error
                 d["error"] = {
@@ -91,7 +115,16 @@ class Tracer:
         tracer = cls()
         if not path.exists():
             return tracer
-        data = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        # Support both old format (list) and new format (dict with pages/transitions)
+        if isinstance(raw, list):
+            entries_data, transitions_data = raw, []
+        else:
+            entries_data = raw.get("pages", [])
+            transitions_data = raw.get("transitions", [])
+        for t in transitions_data:
+            tracer._transitions.append(Transition(**t))
+        data = entries_data
         for d in data:
             page = d.get("page", "")
             tracer._page_index[page] = len(tracer._entries)
@@ -112,6 +145,7 @@ class Tracer:
                 parent=d.get("parent"),
                 via_tap=d.get("via_tap"),
                 depth=d.get("depth", 0),
+                timestamp=d.get("timestamp", ""),
                 error=error,
             ))
         return tracer

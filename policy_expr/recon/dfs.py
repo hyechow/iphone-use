@@ -31,7 +31,7 @@ class DfsPageNode:
 
 
 def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
-                sample: int = 0) -> list[DfsPageNode]:
+                sample: int = 0, similarity_threshold: float = 0.5) -> list[DfsPageNode]:
     """Top-level DFS exploration.
 
     Phone must be on the root page.
@@ -45,6 +45,7 @@ def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
     tracer = Tracer()
     trace_path = app_log_dir / "trace.json"
     visited_screenshots: list[bytes] = []
+    visited_page_entries: list[tuple[str, bytes]] = []
     from policy_expr.recon.back_nav import _get_identity_comp
     id_comp = _get_identity_comp()
     chain_to_page: dict[tuple, str] = {}
@@ -59,6 +60,7 @@ def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
 
     # Record root
     visited_screenshots.append(png_bytes)
+    visited_page_entries.append((page_name, png_bytes))
     tracer.record_page(page_name, None, None, 0)
     tracer.save(trace_path)
 
@@ -101,7 +103,7 @@ def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
         # Recursive DFS into child
         child_node = _dfs_recursive(
             phone, child_chain, child_nav_stack, root_ctx,
-            chain_to_page, visited_screenshots, id_comp, tracer, trace_path,
+            chain_to_page, visited_screenshots, visited_page_entries, id_comp, tracer, trace_path,
             app_log_dir, max_depth - 1, sample,
         )
 
@@ -144,6 +146,19 @@ def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
         raise
 
     # DFS into children is now handled inside _probe_page_dfs via callback
+
+    # Post-exploration: pairwise similarity report
+    if len(visited_page_entries) > 1:
+        compute_pairwise_similarity(
+            visited_page_entries,
+            threshold=similarity_threshold,
+            save_path=app_log_dir / "similarity_report.json",
+        )
+
+    # Post-exploration: transition graph
+    from policy_expr.recon.viz_transitions import generate_transition_graph
+    generate_transition_graph(trace_path, app_log_dir / "transition_graph.html")
+
     return [root_node]
 
 
@@ -189,7 +204,8 @@ def _dfs_explore_children(
         # 3. Recursive DFS into child
         child_node = _dfs_recursive(
             phone, child_chain, child_nav_stack, root_ctx,
-            chain_to_page, visited_screenshots, id_comp, tracer, trace_path,
+            chain_to_page, visited_screenshots, [],
+            id_comp, tracer, trace_path,
             app_log_dir, remaining_depth - 1, sample,
         )
 
@@ -223,6 +239,7 @@ def _dfs_recursive(
     root_ctx: tuple,
     chain_to_page: dict[tuple, str],
     visited_screenshots: list[bytes],
+    visited_page_entries: list[tuple[str, bytes]],
     id_comp,
     tracer: Tracer,
     trace_path: Path,
@@ -250,19 +267,27 @@ def _dfs_recursive(
     via_tap = nav_chain[-1][2] if nav_chain else None
     chain_to_page[chain_key] = page_name
 
+    _src = parent_page or ""
+    _tap = via_tap or ""
+
     # Check if this page has been visited before (by visual similarity)
     for visited_bytes in visited_screenshots:
         if id_comp.is_same_page(visited_bytes, png_bytes).matched:
             print(f"  已访问（视觉相似），跳过: {page_name}")
+            tracer.record_transition(_src, _tap, page_name, "skipped_visited")
+            tracer.save(trace_path)
             return None
 
     visited_screenshots.append(png_bytes)
+    visited_page_entries.append((page_name, png_bytes))
     tracer.record_page(page_name, parent_page, via_tap, len(nav_chain))
     tracer.save(trace_path)
 
     already_learned = _check_knowledge_exists(app, signature)
     if already_learned and max_depth <= 0:
         print(f"  已学习过，跳过: {already_learned}")
+        tracer.record_transition(_src, _tap, page_name, "skipped_known")
+        tracer.save(trace_path)
         return None
 
     out_dir = app_log_dir / page_name
@@ -276,8 +301,12 @@ def _dfs_recursive(
     # Probe (skip if max_depth reached)
     if max_depth == 0:
         print(f"  [max_depth=0] 跳过探测，仅记录页面")
+        tracer.record_transition(_src, _tap, page_name, "depth_limit")
+        tracer.save(trace_path)
         node.recon_result = None
     else:
+        tracer.record_transition(_src, _tap, page_name, "entered")
+        tracer.save(trace_path)
         try:
             # DFS-style incremental probing with callback
             def _on_element_tapped(area, after_bytes, navigated, tap_index, tap_result):
@@ -301,7 +330,7 @@ def _dfs_recursive(
                 # Recursive DFS into child
                 child_node = _dfs_recursive(
                     phone, child_chain, child_nav_stack, root_ctx,
-                    chain_to_page, visited_screenshots, id_comp, tracer, trace_path,
+                    chain_to_page, visited_screenshots, visited_page_entries, id_comp, tracer, trace_path,
                     app_log_dir, max_depth - 1, sample,
                 )
 
@@ -514,3 +543,56 @@ def _check_knowledge_exists(app: str, signature: str) -> Path | None:
 
 def _count_nodes(nodes: list[DfsPageNode]) -> int:
     return sum(1 + _count_nodes(n.children) for n in nodes)
+
+
+# ---------------------------------------------------------------------------
+# Post-exploration similarity report
+# ---------------------------------------------------------------------------
+
+def compute_pairwise_similarity(
+    page_entries: list[tuple[str, bytes]],
+    threshold: float = 0.5,
+    save_path: Path | None = None,
+) -> list[dict]:
+    """Compute pairwise similarity for all visited pages and print a report.
+
+    Args:
+        page_entries: list of (page_name, png_bytes) in visit order.
+        threshold: pairs with similarity >= threshold are flagged in the report.
+        save_path: if given, save the full pair list as JSON.
+
+    Returns:
+        list of {"page_a", "page_b", "similarity"} sorted by similarity desc.
+    """
+    import json
+    from policy_expr.recon.page_compare import PageComparator
+
+    comparator = PageComparator()
+    n = len(page_entries)
+    pairs: list[dict] = []
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            name_a, bytes_a = page_entries[i]
+            name_b, bytes_b = page_entries[j]
+            sim = comparator.raw_similarity(bytes_a, bytes_b)
+            pairs.append({"page_a": name_a, "page_b": name_b, "similarity": round(sim, 4)})
+
+    pairs.sort(key=lambda x: x["similarity"], reverse=True)
+
+    print(f"\n{'=' * 70}")
+    print(f"页面两两相似度报告  共 {n} 个页面 / {len(pairs)} 对  阈值={threshold}")
+    print(f"{'=' * 70}")
+    for p in pairs:
+        flag = "  ⚠ 高相似" if p["similarity"] >= threshold else ""
+        print(f"  {p['page_a'][:24]:24s}  vs  {p['page_b'][:24]:24s}  {p['similarity']:.4f}{flag}")
+
+    above = [p for p in pairs if p["similarity"] >= threshold]
+    print(f"\n  >= {threshold}: {len(above)} 对 / {len(pairs)} 对")
+
+    if save_path:
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        save_path.write_text(json.dumps({"threshold": threshold, "pairs": pairs}, ensure_ascii=False, indent=2))
+        print(f"  已保存: {save_path}")
+
+    return pairs

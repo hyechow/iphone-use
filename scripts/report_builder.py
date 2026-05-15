@@ -458,7 +458,9 @@ class ReconReportBuilder:
         trace_data: list[dict] | None = None
         trace_path = log_dir / "trace.json"
         if trace_path.exists():
-            trace_data = json.loads(trace_path.read_text(encoding="utf-8"))
+            _raw = json.loads(trace_path.read_text(encoding="utf-8"))
+            # Support both old format (list) and new format (dict with pages/transitions)
+            trace_data = _raw if isinstance(_raw, list) else _raw.get("pages", [])
 
         # Index trace errors by page name for quick lookup
         trace_errors: dict[str, str] = {}
