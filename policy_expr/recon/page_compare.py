@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from policy_expr.recon.utils import ScreenMatchDecision, png_similarity
+
+if TYPE_CHECKING:
+    from policy_expr.recon.cascade_matcher import CascadeMatcher
 
 
 # ---------------------------------------------------------------------------
@@ -30,19 +33,33 @@ class EdgeIoUBackend:
 # ---------------------------------------------------------------------------
 
 class PageComparator:
-    """High-level page comparison backed by a pluggable SimilarityBackend."""
+    """High-level page comparison backed by a pluggable SimilarityBackend.
+
+    Navigation detection uses a visual-primary cascade:
+      1. Fast EdgeIoU score.
+         - >= no_change_threshold  → same page (no navigation)
+         - <  same_page_threshold  → navigated
+      2. Gray zone: use CascadeMatcher (GUIClip + semantic) to disambiguate.
+         - GUIClip sim >= cascade_vis  → same page type; confirm with text
+         - text sim >= cascade_txt     → same page (content refresh, not nav)
+         - otherwise                   → navigated
+    """
 
     def __init__(
         self,
         backend: SimilarityBackend | None = None,
         same_page_threshold: float = 0.20,
         no_change_threshold: float = 0.80,
-        use_fingerprint: bool = True,
+        cascade: "CascadeMatcher | None" = None,
+        cascade_vis: float = 0.85,
+        cascade_txt: float = 0.92,
     ):
         self._backend = backend or EdgeIoUBackend()
         self._same_page_threshold = same_page_threshold
         self._no_change_threshold = no_change_threshold
-        self._use_fingerprint = use_fingerprint
+        self._cascade = cascade
+        self._cascade_vis = cascade_vis
+        self._cascade_txt = cascade_txt
 
     @property
     def backend_name(self) -> str:
@@ -112,20 +129,48 @@ class PageComparator:
         if sim >= self._no_change_threshold:
             return False, f"no_change (sim={sim:.3f})"
 
-        if sim >= self._same_page_threshold:
-            if self._use_fingerprint and _fingerprint_match(initial_png, after_png):
-                return False, f"same_page (sim={sim:.3f}, fingerprint match)"
+        if sim < self._same_page_threshold:
+            return True, f"navigated (sim={sim:.3f})"
+
+        # Gray zone: use cascade matcher to disambiguate
+        if self._cascade is not None:
+            return _cascade_nav_check(
+                initial_png, after_png, sim, self._cascade,
+                self._cascade_vis, self._cascade_txt,
+            )
 
         return True, f"navigated (sim={sim:.3f})"
 
 
 # ---------------------------------------------------------------------------
-# Fingerprint helper
+# Cascade nav helper (visual-primary)
 # ---------------------------------------------------------------------------
 
-def _fingerprint_match(png_a: bytes, png_b: bytes) -> bool:
-    from policy_expr.recon.fingerprint import compute_fingerprint
-    return compute_fingerprint(png_a).key == compute_fingerprint(png_b).key
+def _cascade_nav_check(
+    initial_png: bytes,
+    after_png: bytes,
+    edge_sim: float,
+    cascade: "CascadeMatcher",
+    vis_threshold: float,
+    txt_threshold: float,
+) -> tuple[bool, str]:
+    """Visual-primary cascade for navigation disambiguation."""
+    emb_a = cascade.embed_visual(initial_png)
+    emb_b = cascade.embed_visual(after_png)
+    vis = cascade.visual_sim(emb_a, emb_b)
+
+    if vis < vis_threshold:
+        return True, f"navigated (edge={edge_sim:.3f}, guiclip={vis:.3f})"
+
+    # GUIClip says similar → confirm with semantic
+    cascade.fill_text(emb_a, initial_png)
+    cascade.fill_text(emb_b, after_png)
+    txt = cascade.text_sim(emb_a, emb_b)
+
+    if txt >= txt_threshold:
+        return False, f"same_page (guiclip={vis:.3f}, text={txt:.3f})"
+
+    return True, f"navigated (guiclip={vis:.3f}, text={txt:.3f})"
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +181,7 @@ def make_comparator(method: str = "edge_iou") -> PageComparator:
     """Construct a PageComparator by method name.
 
     Args:
-        method: "edge_iou" (default), "guiclip".
+        method: "edge_iou" (default), "guiclip", "cascade".
     """
     if method == "guiclip":
         from policy_expr.recon.guiclip_backend import GUIClipBackend
@@ -145,4 +190,8 @@ def make_comparator(method: str = "edge_iou") -> PageComparator:
             same_page_threshold=0.90,
             no_change_threshold=0.98,
         )
+    if method == "cascade":
+        from policy_expr.recon.cascade_matcher import CascadeMatcher
+        cascade = CascadeMatcher()
+        return PageComparator(cascade=cascade)
     return PageComparator()
