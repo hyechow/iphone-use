@@ -5,13 +5,13 @@ Usage:
 
 Flow:
     1. Connect to phone (user must already be on a mini-program page).
-    2. Parse the current screenshot with PageParser.
-    3. Print identity fields including is_miniprogram.
-    4. If mini-program detected, tap the × capsule button to close it.
+    2. Take screenshot, detect capsule via GUIClip (no LLM needed).
+    3. If detected, parse page to find × coordinates and tap to close.
 """
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -24,7 +24,7 @@ load_dotenv(ROOT / ".env")
 
 from policy_expr.perception import LivePhoneSession
 from policy_expr.executor import logical_xy
-from policy_expr.recon.page_parser import PageParser
+from policy_expr.recon.page_parser import PageParser, detect_miniprogram
 
 
 def main() -> None:
@@ -38,41 +38,35 @@ def main() -> None:
         print("=" * 60)
         png = phone.screenshot()
 
-        print("  解析页面（LLM 调用中）...")
+        # Step 1: GUIClip capsule detection (instant, no LLM)
+        is_mini = detect_miniprogram(png)
+        print(f"\n  is_miniprogram: {is_mini}")
+
+        if not is_mini:
+            print("  未检测到小程序，退出。")
+            return
+
+        # Step 2: Parse page to get × button coordinates (needs LLM)
+        print("  解析页面元素（获取胶囊 × 坐标）...")
         page = parser.parse_screen(png)
+        print(f"  description: {page.description}")
 
-        print(f"\n  app_name      : {page.app_name}")
-        print(f"  page_title    : {page.page_title}")
-        print(f"  page_type     : {page.page_type}")
-        print(f"  is_miniprogram: {page.is_miniprogram}")
-        print(f"  signature     : {page.signature}")
-
-        print(f"\n  interactive_elements ({len(page.interactive_elements)} 个):")
+        print(f"  interactive_elements ({len(page.interactive_elements)} 个):")
         for el in page.interactive_elements:
             sem = f"  [{el.icon_semantic}]" if el.icon_semantic else ""
             print(f"    ({el.x:>5.0f},{el.y:>4.0f})  {el.element_type:12s}{sem}  {el.label or '(无标签)'}")
 
-        if not page.is_miniprogram:
-            print("\n  未检测到小程序，退出。")
-            return
-
-        print("\n" + "=" * 60)
-        print("  检测到小程序，寻找胶囊 × 按钮...")
-        print("=" * 60)
-
-        close_el = next(
-            (e for e in page.interactive_elements
-             if e.icon_semantic == "close" and e.x > 800 and e.y < 150),
-            None,
-        )
-
-        if close_el:
+        # Find rightmost icon in top-right area — capsule × is always the rightmost
+        top_right_icons = [
+            e for e in page.interactive_elements
+            if e.x > 800 and e.y < 200
+        ]
+        if top_right_icons:
+            close_el = max(top_right_icons, key=lambda e: e.x)
             ax, ay = close_el.x, close_el.y
-            print(f"  胶囊× 识别坐标: ({ax:.0f}, {ay:.0f})")
+            ax = min(ax + 25, 970)
         else:
-            ax, ay = 945.0, 65.0
-            print(f"  胶囊× 未识别，使用默认坐标: ({ax:.0f}, {ay:.0f})")
-
+            ax, ay = 950.0, 130.0
         lx, ly = logical_xy(ax, ay)
         print(f"  逻辑坐标: ({lx:.0f}, {ly:.0f})")
 
@@ -84,8 +78,6 @@ def main() -> None:
         after_path = Path("/tmp/miniprogram_after_close.png")
         after_path.write_bytes(after)
         print(f"  关闭后截图: {after_path}")
-
-        import subprocess
         subprocess.Popen(["open", str(after_path)])
         print("  完成。")
 

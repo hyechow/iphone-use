@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -145,8 +146,8 @@ def collect(app: str, depth: int = 0, sample: int = 0) -> None:
         page_name = f"page_{len(entries)}"
         try:
             knowledge = parser.analyze_screen(png_bytes)
-            sig = knowledge.page.signature
-            page_name = sig.split("/")[1] if "/" in sig and len(sig.split("/")) >= 2 else sig
+            desc = knowledge.page.description[:20].strip()
+            page_name = re.sub(r'[\\/:*?"<>|\s]+', '_', desc) or page_name
         except Exception:
             pass
 

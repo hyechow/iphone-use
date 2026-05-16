@@ -16,7 +16,7 @@ from policy_expr.schemas import Observation
 ROOT = Path(__file__).parent.parent
 SCREENSHOT = ROOT / "logs" / "policy_expr" / "single-step" / "screenshot.png"
 _SCK_SERVER = ROOT / "bin" / "sck_server"
-_MASK_PATH = Path(__file__).parent / "mcp_frame_mask.png"
+_MASK_PATH = Path(__file__).parent / "assets" / "mcp_frame_mask.png"
 
 WIN_W = 318
 WIN_H = 701

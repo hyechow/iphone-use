@@ -72,10 +72,6 @@ def probe_elements(
     print(f"{'=' * 60}")
 
     result = ReconResult(
-        app_name=page.app_name,
-        page_title=page.page_title,
-        page_type=page.page_type,
-        signature=page.signature,
         description=page.description,
         elements_count=len(page.interactive_elements),
         initial_screenshot_path=str(initial_screenshot_path or ""),

@@ -49,10 +49,6 @@ class TapResult:
 @dataclass
 class ReconResult:
     """Full recon result for one page."""
-    app_name: str
-    page_title: str
-    page_type: str
-    signature: str
     description: str
     elements_count: int
     initial_screenshot_path: str = ""
@@ -60,10 +56,6 @@ class ReconResult:
 
     def save(self, path: Path) -> None:
         path.write_text(json.dumps({
-            "app_name": self.app_name,
-            "page_title": self.page_title,
-            "page_type": self.page_type,
-            "signature": self.signature,
             "description": self.description,
             "elements_count": self.elements_count,
             "initial_screenshot": self.initial_screenshot_path,
@@ -147,19 +139,7 @@ def decide_by_similarity(initial_png: bytes, current_png: bytes) -> ScreenMatchD
 
 
 def same_page_by_structure(initial_page: ParsedPage, current_page: ParsedPage) -> tuple[bool, str]:
-    """Compare parsed page structure as a model-backed fallback."""
-    if initial_page.signature and initial_page.signature == current_page.signature:
-        return True, "same signature"
-
-    same_identity = (
-        initial_page.app_name == current_page.app_name
-        and initial_page.page_title == current_page.page_title
-        and initial_page.page_type == current_page.page_type
-        and initial_page.bottom_nav.has_nav == current_page.bottom_nav.has_nav
-    )
-    if same_identity:
-        return True, "same identity fields"
-
+    """Compare parsed page structure via element overlap."""
     initial_labels = {
         (el.element_type, el.label.strip())
         for el in initial_page.interactive_elements
@@ -174,13 +154,10 @@ def same_page_by_structure(initial_page: ParsedPage, current_page: ParsedPage) -
         overlap = len(initial_labels & current_labels)
         union = len(initial_labels | current_labels)
         score = overlap / union
-        if score >= 0.7 and initial_page.app_name == current_page.app_name:
+        if score >= 0.7:
             return True, f"element overlap {score:.2f}"
 
-    return False, (
-        f"different page structure: initial={initial_page.signature!r}, "
-        f"current={current_page.signature!r}"
-    )
+    return False, "different page structure"
 
 
 def _font(size: int = 14) -> ImageFont.ImageFont:

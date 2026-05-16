@@ -71,12 +71,13 @@ def _derive_page_name(signature: str) -> str:
 
 def _parse_identity(phone) -> tuple:
     """Screenshot → parse page identity. Returns (png_bytes, knowledge, page_name)."""
+    import re
     png_bytes = phone.screenshot()
 
     # print("\n解析页面身份...")
     knowledge = PageParser().analyze_screen(png_bytes)
-    page_name = _derive_page_name(knowledge.page.signature)
-    # print(f"  页面: {page_name}  签名: {knowledge.page.signature}")
+    desc = knowledge.page.description[:20].strip()
+    page_name = re.sub(r'[\\/:*?"<>|\s]+', '_', desc) or "page"
     return png_bytes, knowledge, page_name
 
 

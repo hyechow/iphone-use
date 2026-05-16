@@ -19,7 +19,6 @@ from policy_expr.trace import Tracer
 class DfsPageNode:
     """One page in the DFS tree. Carries all state needed for deferred knowledge gen."""
     page_name: str
-    signature: str
     parent: str | None
     via_tap: str | None
     depth: int
@@ -39,7 +38,6 @@ def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
     Returns tree of explored pages (children attached).
     """
     from policy_expr.recon.page_parser import PageParser
-    from policy_expr.recon_cli import _derive_page_name
     from policy_expr.recon.page_compare import make_comparator
 
     app = app_log_dir.name
@@ -54,8 +52,7 @@ def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
     # Parse root page identity
     png_bytes = phone.screenshot()
     knowledge = PageParser().analyze_screen(png_bytes)
-    page_name = _derive_page_name(knowledge.page.signature)
-    signature = knowledge.page.signature
+    page_name = _page_name_from_desc(knowledge.page.description)
 
     nav_stack: list[tuple[bytes, tuple[float, float] | None]] = [(png_bytes, None)]
 
@@ -67,15 +64,10 @@ def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
 
     # Map root's empty chain to page name so children can find their parent
     chain_to_page[()] = page_name
-
-    # Check if root already learned
-    already_learned = _check_knowledge_exists(app, signature)
-    if already_learned and max_depth <= 0:
-        print(f"  已学习过，跳过: {already_learned}")
         return []
 
     root_node = DfsPageNode(
-        page_name=page_name, signature=signature,
+        page_name=page_name,
         parent=None, via_tap=None, depth=0,
         nav_chain=[], out_dir=app_log_dir / page_name,
     )
@@ -258,16 +250,24 @@ def _dfs_recursive(
 
     app = app_log_dir.name
 
-    # Parse page identity
-    png_bytes, knowledge, page_name = _parse_identity(phone)
+    # Take screenshot first for mini-program check (before expensive LLM parse)
+    png_bytes = phone.screenshot()
 
-    # Mini-program fast exit: close immediately, skip exploration
-    if knowledge.page.is_miniprogram:
-        print(f"  [小程序] 检测到小程序「{page_name}」，跳过探测，直接关闭")
+    # Mini-program fast exit: GUIClip capsule detection — no LLM needed
+    from policy_expr.recon.page_parser import detect_miniprogram
+    if detect_miniprogram(png_bytes):
+        page_name = "miniprogram"
+        print(f"  [小程序] 检测到小程序，跳过探测，直接关闭")
+        from policy_expr.recon.page_parser import PageParser
+        knowledge = PageParser().analyze_screen(png_bytes)
         _close_miniprogram(phone, knowledge)
         return None
 
-    signature = knowledge.page.signature
+    # Parse page identity
+    from policy_expr.recon.page_parser import PageParser
+    from policy_expr.recon_cli import _derive_page_name
+    knowledge = PageParser().analyze_screen(png_bytes)
+    page_name = _derive_page_name(knowledge.page.description)
 
     # Trace + visited check (using GUIClip for visual page identity)
     chain_key = tuple(nav_chain)
@@ -291,16 +291,9 @@ def _dfs_recursive(
     tracer.record_page(page_name, parent_page, via_tap, len(nav_chain))
     tracer.save(trace_path)
 
-    already_learned = _check_knowledge_exists(app, signature)
-    if already_learned and max_depth <= 0:
-        print(f"  已学习过，跳过: {already_learned}")
-        tracer.record_transition(_src, _tap, page_name, "skipped_known")
-        tracer.save(trace_path)
-        return None
-
     out_dir = app_log_dir / page_name
     node = DfsPageNode(
-        page_name=page_name, signature=signature,
+        page_name=page_name,
         parent=parent_page, via_tap=via_tap,
         depth=len(nav_chain), nav_chain=list(nav_chain),
         out_dir=out_dir,
@@ -398,10 +391,8 @@ def generate_knowledge_postorder(nodes: list[DfsPageNode], app: str) -> None:
 
         # Then this node
         if node.recon_result and not node.knowledge_generated:
-            already = _check_knowledge_exists(app, node.signature)
-            if not already:
-                run_learn(node.out_dir / "recon_result.json")
-                run_knowledge(node.out_dir)
+            run_learn(node.out_dir / "recon_result.json")
+            run_knowledge(node.out_dir)
             node.knowledge_generated = True
             generated[0] += 1
             print(f"  [{generated[0]}/{total}] 知识生成: {node.page_name}")
@@ -417,27 +408,32 @@ def generate_knowledge_postorder(nodes: list[DfsPageNode], app: str) -> None:
 def _parse_identity(phone) -> tuple:
     """Screenshot + parse page identity. Returns (png_bytes, knowledge, page_name)."""
     from policy_expr.recon.page_parser import PageParser
-    from policy_expr.recon_cli import _derive_page_name
 
     png_bytes = phone.screenshot()
     knowledge = PageParser().analyze_screen(png_bytes)
-    page_name = _derive_page_name(knowledge.page.signature)
+    page_name = _page_name_from_desc(knowledge.page.description)
     return png_bytes, knowledge, page_name
 
 
 def _close_miniprogram(phone, knowledge) -> None:
-    """Close a mini-program by tapping its × capsule button."""
-    close_el = next(
-        (e for e in knowledge.page.interactive_elements
-         if e.icon_semantic == "close" and e.x > 800 and e.y < 150),
-        None,
-    )
-    if close_el:
-        lx, ly = logical_xy(close_el.x, close_el.y)
-        print(f"  [小程序] 胶囊× @ ({close_el.x:.0f}, {close_el.y:.0f})")
+    """Close a mini-program by tapping its × capsule button.
+
+    Strategy: find the rightmost icon in the top-right area (x>800, y<200).
+    The capsule button's × is always the rightmost icon in that region.
+    """
+    top_right_icons = [
+        e for e in knowledge.page.interactive_elements
+        if e.x > 800 and e.y < 200
+    ]
+    if top_right_icons:
+        close_el = max(top_right_icons, key=lambda e: e.x)
+        ax, ay = close_el.x, close_el.y
+        ax = min(ax + 25, 970)
+        print(f"  [小程序] 胶囊× @ ({ax:.0f}, {ay:.0f})")
     else:
-        lx, ly = logical_xy(945, 65)
-        print(f"  [小程序] 胶囊× 未识别，使用默认坐标 ({lx:.0f}, {ly:.0f})")
+        ax, ay = 950.0, 130.0
+        print(f"  [小程序] 胶囊× 未识别，使用默认坐标 ({ax:.0f}, {ay:.0f})")
+    lx, ly = logical_xy(ax, ay)
     phone.client.tap(lx, ly)
     time.sleep(1.5)
 
@@ -477,10 +473,6 @@ def _probe_page_dfs(phone, knowledge, png_bytes, out_dir: Path,
     print(f"{'=' * 60}")
 
     result = ReconResult(
-        app_name=page.app_name,
-        page_title=page.page_title,
-        page_type=page.page_type,
-        signature=page.signature,
         description=page.description,
         elements_count=len(page.interactive_elements),
         initial_screenshot_path=str(out_dir / "initial.png"),
@@ -564,13 +556,16 @@ def _probe_page_dfs(phone, knowledge, png_bytes, out_dir: Path,
     return result, out_dir
 
 
-def _check_knowledge_exists(app: str, signature: str) -> Path | None:
-    from policy_expr.recon_cli import _check_knowledge_exists as _cek
-    return _cek(app, signature)
-
-
 def _count_nodes(nodes: list[DfsPageNode]) -> int:
     return sum(1 + _count_nodes(n.children) for n in nodes)
+
+
+def _page_name_from_desc(description: str) -> str:
+    """Sanitize description into a filesystem-safe page name."""
+    import re
+    name = description[:20].strip()
+    name = re.sub(r'[\\/:*?"<>|\s]+', '_', name)
+    return name or "page"
 
 
 # ---------------------------------------------------------------------------
