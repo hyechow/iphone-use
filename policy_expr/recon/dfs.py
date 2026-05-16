@@ -8,7 +8,8 @@ from pathlib import Path
 
 from policy_expr.executor import logical_xy
 from policy_expr.perception import try_resume_mac
-from policy_expr.recon.bfs import _manual_recover, probe_elements
+from policy_expr.recon.back_nav import manual_recover as _manual_recover
+from policy_expr.recon.bfs import probe_elements
 from policy_expr.recon.back_nav import return_to_initial
 from policy_expr.recon.utils import ProbeAbortedError
 from policy_expr.trace import Tracer
@@ -433,6 +434,9 @@ def _probe_page_dfs(phone, knowledge, png_bytes, out_dir: Path,
     from policy_expr.executor import logical_xy
     from policy_expr.recon import viz_result
     from policy_expr.recon.utils import TapResult, ReconResult
+    from llm.structured import get_llm_call_count
+
+    llm_count_start = get_llm_call_count()
 
     page = knowledge.page
     areas = knowledge.areas
@@ -532,7 +536,8 @@ def _probe_page_dfs(phone, knowledge, png_bytes, out_dir: Path,
     # Final save after all taps and callbacks complete
     result.save(result_path)
     ok = sum(1 for t in result.taps if t.tap_ok and t.navigated)
-    print(f"  探测完成: {len(result.taps)} 个元素 (成功导航 {ok})")
+    llm_used = get_llm_call_count() - llm_count_start
+    print(f"  探测完成: {len(result.taps)} 个元素 (成功导航 {ok}, LLM 调用 {llm_used} 次)")
     return result, out_dir
 
 

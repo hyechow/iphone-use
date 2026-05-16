@@ -55,6 +55,10 @@ uv run python -m policy_expr.recon_cli --debug-learn logs/recon/微信/聊天列
 
 # 从侦察目录构建页面操作知识库
 uv run python -m policy_expr.recon_cli --debug-knowledge logs/recon/微信/聊天列表
+
+# 截图数据采集（纯 DFS，不去重，用于 fingerprint/相似度分析）
+uv run python scripts/collect_screenshot_dataset.py 微信 --depth 2
+uv run python scripts/collect_screenshot_dataset.py 微信 --depth 2 --sample 3
 ```
 
 ## 项目结构

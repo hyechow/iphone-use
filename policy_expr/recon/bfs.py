@@ -10,7 +10,7 @@ from policy_expr.perception import try_resume_mac
 from policy_expr.recon.page_compare import PageComparator, make_comparator
 from policy_expr.recon.page_parser import PageKnowledge
 from policy_expr.recon.back_nav import (
-    return_to_initial, back_shot_path, save_if_changed, _match_stack,
+    return_to_initial, back_shot_path, save_if_changed, _match_stack, manual_recover,
 )
 from policy_expr.recon.utils import (
     ProbeAbortedError,
@@ -29,57 +29,8 @@ def _get_comparator() -> PageComparator:
     return _comparator
 
 
-def _manual_recover(
-    client,
-    screenshot: Callable[[], bytes],
-    nav_stack: list[tuple[bytes, tuple[float, float] | None]],
-    top_level: int,
-    prompt: str = "",
-    max_attempts: int = 3,
-) -> bool:
-    """Prompt user to manually navigate back to initial page.
-
-    Returns True if the user successfully recovered, False if aborted.
-    """
-    comp = _get_comparator()
-    initial_bytes = nav_stack[top_level][0]
-
-    for attempt in range(1, max_attempts + 1):
-        print(f"\n  ⚠ {prompt}")
-        print(f"  请手动操作手机回到初始页，然后按回车继续 ({attempt}/{max_attempts})")
-        print(f"  （输入 q 放弃当前页面的探测）", end="", flush=True)
-        user_input = input()
-
-        if user_input.strip().lower() == "q":
-            print("  用户放弃，终止探测")
-            return False
-
-        current_bytes = screenshot()
-        sim = comp.raw_similarity(initial_bytes, current_bytes)
-        print(f"  当前截图与初始页相似度: {sim:.3f}")
-
-        if sim >= comp._no_change_threshold:
-            print(f"  ✓ 已回到初始页")
-            return True
-
-        # Also check if we matched any ancestor (could forward from there)
-        matched_level = _match_stack(comp, nav_stack, current_bytes)
-        if matched_level >= 0:
-            if matched_level == top_level:
-                print(f"  ✓ 已回到初始页")
-                return True
-            print(f"  匹配到祖先页 L{matched_level}，尝试自动 forward 回初始页...")
-            from policy_expr.recon.back_nav import _navigate_forward
-            _navigate_forward(client, nav_stack, matched_level, screenshot)
-            verify_bytes = screenshot()
-            verify_sim = comp.raw_similarity(initial_bytes, verify_bytes)
-            if verify_sim >= comp._no_change_threshold:
-                print(f"  ✓ forward 成功，已回到初始页 ({verify_sim:.3f})")
-                return True
-            print(f"  forward 后仍未到达初始页 ({verify_sim:.3f})")
-
-    print("  多次尝试未能回到初始页，终止探测")
-    return False
+# Backward-compatible alias
+_manual_recover = manual_recover
 
 
 def probe_elements(
@@ -101,6 +52,9 @@ def probe_elements(
     """
     import random
     from policy_expr.executor import logical_xy
+    from llm.structured import get_llm_call_count
+
+    llm_count_start = get_llm_call_count()
 
     page = knowledge.page
     areas = knowledge.areas
@@ -243,5 +197,8 @@ def probe_elements(
                         failed_element="",
                         back_attempts=back_log,
                     )
+
+    llm_used = get_llm_call_count() - llm_count_start
+    print(f"  探测完成: {len(result.taps)} 个元素 (LLM 调用 {llm_used} 次)")
 
     return result

@@ -534,3 +534,60 @@ def return_to_initial(
 
     print("    所有回退策略均未成功返回初始页面")
     return False, log
+
+
+def manual_recover(
+    client,
+    screenshot,
+    nav_stack: list[tuple[bytes, tuple[float, float] | None]],
+    top_level: int,
+    prompt: str = "",
+    max_attempts: int = 3,
+) -> bool:
+    """Prompt user to manually navigate back to initial page.
+
+    Saves the target page screenshot to /tmp for user reference.
+    Returns True if the user successfully recovered, False if aborted.
+    """
+    import tempfile
+    comp = _get_identity_comp()
+    initial_bytes = nav_stack[top_level][0]
+
+    ref_path = Path(tempfile.gettempdir()) / "recon_target_page.png"
+    ref_path.write_bytes(initial_bytes)
+
+    for attempt in range(1, max_attempts + 1):
+        print(f"\n  ⚠ {prompt}")
+        print(f"  目标截图: {ref_path}")
+        print(f"  请手动操作手机回到目标页面，然后按回车继续 ({attempt}/{max_attempts})")
+        print(f"  （输入 q 放弃当前页面的探测）", end="", flush=True)
+        user_input = input()
+
+        if user_input.strip().lower() == "q":
+            print("  用户放弃，终止探测")
+            return False
+
+        current_bytes = screenshot()
+        sim = comp.raw_similarity(initial_bytes, current_bytes)
+        print(f"  当前截图与初始页相似度: {sim:.3f}")
+
+        if sim >= comp._no_change_threshold:
+            print(f"  ✓ 已回到初始页")
+            return True
+
+        matched_level = _match_stack(comp, nav_stack, current_bytes)
+        if matched_level >= 0:
+            if matched_level == top_level:
+                print(f"  ✓ 已回到初始页")
+                return True
+            print(f"  匹配到祖先页 L{matched_level}，尝试自动 forward 回初始页...")
+            _navigate_forward(client, nav_stack, matched_level, screenshot)
+            verify_bytes = screenshot()
+            verify_sim = comp.raw_similarity(initial_bytes, verify_bytes)
+            if verify_sim >= comp._no_change_threshold:
+                print(f"  ✓ forward 成功，已回到初始页 ({verify_sim:.3f})")
+                return True
+            print(f"  forward 后仍未到达初始页 ({verify_sim:.3f})")
+
+    print("  多次尝试未能回到初始页，终止探测")
+    return False
