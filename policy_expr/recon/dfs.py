@@ -64,7 +64,6 @@ def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
 
     # Map root's empty chain to page name so children can find their parent
     chain_to_page[()] = page_name
-        return []
 
     root_node = DfsPageNode(
         page_name=page_name,
@@ -255,12 +254,10 @@ def _dfs_recursive(
 
     # Mini-program fast exit: GUIClip capsule detection — no LLM needed
     from policy_expr.recon.page_parser import detect_miniprogram
-    if detect_miniprogram(png_bytes):
-        page_name = "miniprogram"
+    close_xy = detect_miniprogram(png_bytes)
+    if close_xy is not None:
         print(f"  [小程序] 检测到小程序，跳过探测，直接关闭")
-        from policy_expr.recon.page_parser import PageParser
-        knowledge = PageParser().analyze_screen(png_bytes)
-        _close_miniprogram(phone, knowledge)
+        _tap_close_xy(phone, close_xy)
         return None
 
     # Parse page identity
@@ -413,6 +410,15 @@ def _parse_identity(phone) -> tuple:
     knowledge = PageParser().analyze_screen(png_bytes)
     page_name = _page_name_from_desc(knowledge.page.description)
     return png_bytes, knowledge, page_name
+
+
+def _tap_close_xy(phone, close_xy: list[float]) -> None:
+    """Tap the capsule × at the given 0-1000 coordinates and wait."""
+    ax, ay = close_xy[0], close_xy[1]
+    lx, ly = logical_xy(ax, ay)
+    print(f"  [小程序] 胶囊× @ ({ax:.0f}, {ay:.0f})  →  逻辑({lx:.0f}, {ly:.0f})")
+    phone.client.tap(lx, ly)
+    time.sleep(1.5)
 
 
 def _close_miniprogram(phone, knowledge) -> None:

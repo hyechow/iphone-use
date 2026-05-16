@@ -309,10 +309,12 @@ def enrich_with_icons(
 # Mini-program detection via GUIClip capsule embedding
 # ---------------------------------------------------------------------------
 
-# Lazy-loaded: (matcher, [ref_embeddings], region, threshold)
-_capsule_state: list | None = None
+# Lazy-loaded: (matcher, ref_embs, refs, region, threshold)
+_capsule_state: tuple | None = None
 
-_CAPSULE_REFS_PATH = Path(__file__).parent.parent / "assets" / "capsule_refs.json"
+_ASSETS = Path(__file__).parent.parent / "assets"
+_CAPSULE_REFS_PATH = _ASSETS / "capsule_refs.json"
+_CAPSULE_EMBS_PATH = _ASSETS / "capsule_embeddings.npz"
 
 
 def _get_capsule_state():
@@ -322,38 +324,36 @@ def _get_capsule_state():
         import numpy as _np
         from policy_expr.recon.cascade_matcher import CascadeMatcher, PageEmbedding
 
-        if not _CAPSULE_REFS_PATH.exists():
-            _capsule_state = None
+        if not _CAPSULE_REFS_PATH.exists() or not _CAPSULE_EMBS_PATH.exists():
             return None
 
         data = _json.loads(_CAPSULE_REFS_PATH.read_text())
+        npz = _np.load(_CAPSULE_EMBS_PATH)
         matcher = CascadeMatcher()
-        ref_embs = [PageEmbedding(visual=_np.array(r["embedding"])) for r in data["references"]]
+        refs = data["references"]
+        ref_embs = [PageEmbedding(visual=npz["embeddings"][i]) for i in range(len(refs))]
         if not ref_embs:
-            _capsule_state = None
             return None
 
-        _capsule_state = (matcher, ref_embs, data["capsule_region"], data["threshold"])
+        _capsule_state = (matcher, ref_embs, refs, data["capsule_region"], data["threshold"])
     return _capsule_state
 
 
-def detect_miniprogram(png_bytes: bytes) -> bool:
+def detect_miniprogram(png_bytes: bytes) -> list[float] | None:
     """Detect mini-program by GUIClip similarity on capsule region.
 
-    Crops the top-right capsule area, computes GUIClip embedding,
-    and compares against reference capsule embeddings.
-    Returns True if similarity with ANY reference >= threshold.
+    Returns the matched reference's close_xy [x, y] (0-1000) if detected,
+    None otherwise.
     """
     import io as _io
-    import json as _json
 
     from PIL import Image as _Image
 
     state = _get_capsule_state()
     if state is None:
-        return False
+        return None
 
-    matcher, ref_embs, region, threshold = state
+    matcher, ref_embs, refs, region, threshold = state
     x1r, x2r = region["x_ratio"]
     y1r, y2r = region["y_ratio"]
 
@@ -365,13 +365,22 @@ def detect_miniprogram(png_bytes: bytes) -> bool:
 
     emb = matcher.embed_visual(buf.getvalue())
 
-    best_sim = 0.0
-    for ref_emb in ref_embs:
+    best_sim, best_idx = 0.0, -1
+    for i, ref_emb in enumerate(ref_embs):
         sim = matcher.visual_sim(ref_emb, emb)
-        best_sim = max(best_sim, sim)
+        if sim > best_sim:
+            best_sim, best_idx = sim, i
 
-    print(f"  [miniprogram detect] GUIClip best_sim={best_sim:.3f}  threshold={threshold}")
-    return best_sim >= threshold
+    if best_sim >= threshold and best_idx >= 0:
+        ref = refs[best_idx]
+        close_xy = ref.get("close_xy")
+        print(f"  [miniprogram detect] ✓ 命中「{ref['name']}」sim={best_sim:.3f}  close_xy={close_xy}")
+        return close_xy
+    sims = ", ".join(f"{refs[i]['name']}={s:.3f}" for i, s in enumerate(
+        matcher.visual_sim(ref_embs[i], emb) for i in range(len(refs))
+    ))
+    print(f"  [miniprogram detect] ✗ 未命中 threshold={threshold}  {sims}")
+    return None
 
 
 class PageParser:
