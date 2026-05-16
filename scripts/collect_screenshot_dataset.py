@@ -36,6 +36,29 @@ if str(ROOT) not in sys.path:
 LOG_ROOT = ROOT / "logs" / "dataset"
 
 
+class _TeeLogger:
+    """Tee stdout and stderr to a log file while keeping terminal output."""
+
+    def __init__(self, log_path: Path):
+        self._log = log_path.open("a", encoding="utf-8")
+        self._stdout = sys.stdout
+        self._stderr = sys.stderr
+        sys.stdout = self  # type: ignore[assignment]
+        sys.stderr = self  # type: ignore[assignment]
+
+    def write(self, data: str) -> int:
+        self._stdout.write(data)
+        self._log.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        self._stdout.flush()
+        self._log.flush()
+
+    def __getattr__(self, name: str):
+        return getattr(self._stdout, name)
+
+
 @dataclass
 class TapRecord:
     index: int
@@ -66,6 +89,10 @@ def collect(app: str, depth: int = 0, sample: int = 0) -> None:
     out_dir = LOG_ROOT / app
     pages_dir = out_dir / "pages"
     pages_dir.mkdir(parents=True, exist_ok=True)
+
+    # Tee stdout/stderr to log file
+    log_path = out_dir / "log.txt"
+    _TeeLogger(log_path)
 
     # Preload GUIClip model
     print("预加载 GUIClip 模型...")
@@ -167,6 +194,11 @@ def collect(app: str, depth: int = 0, sample: int = 0) -> None:
             time.sleep(2.0)
 
             after_bytes = phone.screenshot()
+            if not after_bytes:
+                from policy_expr.perception import try_resume_mac
+                print(f"      Mac 弹窗阻断，关闭后跳过")
+                try_resume_mac(phone.client)
+                continue
             safe_label = area.label.replace("/", "_").replace(":", "_")[:20]
             after_path = f"{_page_seq(idx, page_name)}/taps/tap_{i:02d}_{safe_label}.png"
             (tap_dir / f"tap_{i:02d}_{safe_label}.png").write_bytes(after_bytes)

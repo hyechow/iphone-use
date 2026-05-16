@@ -28,4 +28,5 @@ dependencies = [
     "imagehash>=4.3.2",
     "scikit-image>=0.26.0",
     "transformers>=5.8.1",
+    "sentence-transformers>=5.5.0",
 ]
