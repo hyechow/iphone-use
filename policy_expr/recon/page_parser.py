@@ -65,7 +65,12 @@ class InteractiveElement(BaseModel):
     )
 
 
-class PageIdentity(BaseModel):
+class BottomNav(BaseModel):
+    """底部导航栏检测结果。"""
+    has_nav: bool = Field(description="页面是否有底部导航栏（tab bar / 底部操作栏）")
+
+
+class ParsedPage(BaseModel):
     app_name: str = Field(description="当前前台应用名称，如「微信」「支付宝」")
     page_title: str = Field(description="页面标题或名称，如「聊天列表」「通讯录」「个人主页」")
     page_type: str = Field(
@@ -79,15 +84,14 @@ class PageIdentity(BaseModel):
             "「微信/通讯录/section[新朋友,群聊,标签]」"
         )
     )
-
-
-class BottomNav(BaseModel):
-    """底部导航栏检测结果。"""
-    has_nav: bool = Field(description="页面是否有底部导航栏（tab bar / 底部操作栏）")
-
-
-class ParsedPage(BaseModel):
-    identity: PageIdentity
+    is_miniprogram: bool = Field(
+        default=False,
+        description=(
+            "是否是微信小程序或 App 内嵌 H5/WebView 页面。"
+            "判断依据：右上角有胶囊按钮（pill 形，左圆含 ···，右圆含 ×）。"
+            "普通 iOS 原生页面填 false。"
+        ),
+    )
     description: str = Field(description="一句话描述该页面的功能或用途")
     bottom_nav: BottomNav = Field(
         description="底部导航栏区域，无则 y_start=y_end=-1"
@@ -198,6 +202,16 @@ SYSTEM_PROMPT = """\
 你是一个 iPhone 页面分析器。仔细分析截图，输出页面身份和所有可交互元素。
 
 坐标系：左上角 (0, 0)，右下角 (1000, 1000)。坐标代表元素的视觉中心。
+
+## ⚠️ 首要检查：是否是小程序 / H5 WebView
+**在做任何其他分析之前，先看右上角**：
+- 如果右上角有一个**胶囊形按钮**（pill / 圆角矩形轮廓，内含两个区域）：
+  - 左区域：···（三个点，更多菜单）
+  - 右区域：× 或 ✕（关闭符号）
+- 这是微信小程序或其他 App 内嵌 H5 的专属胶囊按钮。
+- 只要看到这个胶囊按钮，**立即将 is_miniprogram 设为 true**，无需满足其他条件。
+- 同时，必须将胶囊右侧的 × 单独输出为一条 icon 元素（icon_semantic="close"，坐标指向 × 的中心）。
+- 普通 iOS 原生页面没有这个胶囊按钮，is_miniprogram 填 false。
 
 ## 底部导航栏（bottom_nav）
 判断页面是否有底部导航栏（tab bar / 底部操作栏）。有则 has_nav=true，无则 false。
@@ -318,7 +332,11 @@ def enrich_with_icons(
         ))
 
     return ParsedPage(
-        identity=page.identity,
+        app_name=page.app_name,
+        page_title=page.page_title,
+        page_type=page.page_type,
+        signature=page.signature,
+        is_miniprogram=page.is_miniprogram,
         description=page.description,
         bottom_nav=page.bottom_nav,
         interactive_elements=merged,

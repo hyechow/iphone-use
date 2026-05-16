@@ -75,8 +75,8 @@ def _parse_identity(phone) -> tuple:
 
     # print("\n解析页面身份...")
     knowledge = PageParser().analyze_screen(png_bytes)
-    page_name = _derive_page_name(knowledge.page.identity.signature)
-    # print(f"  页面: {page_name}  签名: {knowledge.page.identity.signature}")
+    page_name = _derive_page_name(knowledge.page.signature)
+    # print(f"  页面: {page_name}  签名: {knowledge.page.signature}")
     return png_bytes, knowledge, page_name
 
 

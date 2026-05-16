@@ -148,15 +148,13 @@ def decide_by_similarity(initial_png: bytes, current_png: bytes) -> ScreenMatchD
 
 def same_page_by_structure(initial_page: ParsedPage, current_page: ParsedPage) -> tuple[bool, str]:
     """Compare parsed page structure as a model-backed fallback."""
-    initial_ident = initial_page.identity
-    current_ident = current_page.identity
-    if initial_ident.signature and initial_ident.signature == current_ident.signature:
+    if initial_page.signature and initial_page.signature == current_page.signature:
         return True, "same signature"
 
     same_identity = (
-        initial_ident.app_name == current_ident.app_name
-        and initial_ident.page_title == current_ident.page_title
-        and initial_ident.page_type == current_ident.page_type
+        initial_page.app_name == current_page.app_name
+        and initial_page.page_title == current_page.page_title
+        and initial_page.page_type == current_page.page_type
         and initial_page.bottom_nav.has_nav == current_page.bottom_nav.has_nav
     )
     if same_identity:
@@ -176,12 +174,12 @@ def same_page_by_structure(initial_page: ParsedPage, current_page: ParsedPage) -
         overlap = len(initial_labels & current_labels)
         union = len(initial_labels | current_labels)
         score = overlap / union
-        if score >= 0.7 and initial_ident.app_name == current_ident.app_name:
+        if score >= 0.7 and initial_page.app_name == current_page.app_name:
             return True, f"element overlap {score:.2f}"
 
     return False, (
-        f"different page structure: initial={initial_ident.signature!r}, "
-        f"current={current_ident.signature!r}"
+        f"different page structure: initial={initial_page.signature!r}, "
+        f"current={current_page.signature!r}"
     )
 
 
@@ -292,10 +290,9 @@ def visualize_areas(
 
 def print_areas(knowledge: "PageKnowledge") -> None:  # noqa: F821
     """Print areas to stdout."""
-    ident = knowledge.page.identity
-    # print(f"  应用 : {ident.app_name}")
-    # print(f"  页面 : {ident.page_title}")
-    # print(f"  指纹 : {ident.signature}")
+    # print(f"  应用 : {knowledge.page.app_name}")
+    # print(f"  页面 : {knowledge.page.page_title}")
+    # print(f"  指纹 : {knowledge.page.signature}")
     # print(f"  区域数 : {len(knowledge.areas)}")
     # for i, a in enumerate(knowledge.areas, 1):
     #     print(f"    [{i:2d}] ({a.center_xy[0]:5.0f},{a.center_xy[1]:5.0f})  "

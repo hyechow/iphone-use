@@ -145,7 +145,7 @@ def collect(app: str, depth: int = 0, sample: int = 0) -> None:
         page_name = f"page_{len(entries)}"
         try:
             knowledge = parser.analyze_screen(png_bytes)
-            sig = knowledge.page.identity.signature
+            sig = knowledge.page.signature
             page_name = sig.split("/")[1] if "/" in sig and len(sig.split("/")) >= 2 else sig
         except Exception:
             pass

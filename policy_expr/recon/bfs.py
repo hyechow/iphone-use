@@ -71,12 +71,11 @@ def probe_elements(
     print(f"点击探测: {len(areas)} 个可交互区域")
     print(f"{'=' * 60}")
 
-    ident = page.identity
     result = ReconResult(
-        app_name=ident.app_name,
-        page_title=ident.page_title,
-        page_type=ident.page_type,
-        signature=ident.signature,
+        app_name=page.app_name,
+        page_title=page.page_title,
+        page_type=page.page_type,
+        signature=page.signature,
         description=page.description,
         elements_count=len(page.interactive_elements),
         initial_screenshot_path=str(initial_screenshot_path or ""),

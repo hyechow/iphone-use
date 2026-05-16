@@ -54,8 +54,8 @@ def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
     # Parse root page identity
     png_bytes = phone.screenshot()
     knowledge = PageParser().analyze_screen(png_bytes)
-    page_name = _derive_page_name(knowledge.page.identity.signature)
-    signature = knowledge.page.identity.signature
+    page_name = _derive_page_name(knowledge.page.signature)
+    signature = knowledge.page.signature
 
     nav_stack: list[tuple[bytes, tuple[float, float] | None]] = [(png_bytes, None)]
 
@@ -260,7 +260,14 @@ def _dfs_recursive(
 
     # Parse page identity
     png_bytes, knowledge, page_name = _parse_identity(phone)
-    signature = knowledge.page.identity.signature
+
+    # Mini-program fast exit: close immediately, skip exploration
+    if knowledge.page.is_miniprogram:
+        print(f"  [小程序] 检测到小程序「{page_name}」，跳过探测，直接关闭")
+        _close_miniprogram(phone, knowledge)
+        return None
+
+    signature = knowledge.page.signature
 
     # Trace + visited check (using GUIClip for visual page identity)
     chain_key = tuple(nav_chain)
@@ -414,8 +421,25 @@ def _parse_identity(phone) -> tuple:
 
     png_bytes = phone.screenshot()
     knowledge = PageParser().analyze_screen(png_bytes)
-    page_name = _derive_page_name(knowledge.page.identity.signature)
+    page_name = _derive_page_name(knowledge.page.signature)
     return png_bytes, knowledge, page_name
+
+
+def _close_miniprogram(phone, knowledge) -> None:
+    """Close a mini-program by tapping its × capsule button."""
+    close_el = next(
+        (e for e in knowledge.page.interactive_elements
+         if e.icon_semantic == "close" and e.x > 800 and e.y < 150),
+        None,
+    )
+    if close_el:
+        lx, ly = logical_xy(close_el.x, close_el.y)
+        print(f"  [小程序] 胶囊× @ ({close_el.x:.0f}, {close_el.y:.0f})")
+    else:
+        lx, ly = logical_xy(945, 65)
+        print(f"  [小程序] 胶囊× 未识别，使用默认坐标 ({lx:.0f}, {ly:.0f})")
+    phone.client.tap(lx, ly)
+    time.sleep(1.5)
 
 
 def _probe_page_dfs(phone, knowledge, png_bytes, out_dir: Path,
@@ -452,12 +476,11 @@ def _probe_page_dfs(phone, knowledge, png_bytes, out_dir: Path,
     print(f"点击探测: {len(areas)} 个可交互区域")
     print(f"{'=' * 60}")
 
-    ident = page.identity
     result = ReconResult(
-        app_name=ident.app_name,
-        page_title=ident.page_title,
-        page_type=ident.page_type,
-        signature=ident.signature,
+        app_name=page.app_name,
+        page_title=page.page_title,
+        page_type=page.page_type,
+        signature=page.signature,
         description=page.description,
         elements_count=len(page.interactive_elements),
         initial_screenshot_path=str(out_dir / "initial.png"),

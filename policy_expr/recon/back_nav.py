@@ -67,7 +67,11 @@ BACK_PROMPT = """\
 处理优先级：
 1. 如果 AFTER 有弹窗/对话框/广告浮层覆盖页面 → 点击关闭/取消/跳过/拒绝按钮关掉弹窗
 2. 如果是通过底部 tab 切换进入的 → 点击原来的底部 tab 返回
-3. 如果是正常跳转的新页面 → 点击左上角返回按钮、或关闭按钮（×）
+3. 如果 AFTER 是微信小程序或 H5 页面（特征：顶部有小程序标题栏，右上角有椭圆形胶囊按钮含"···"和"×"）：
+   - 点击胶囊按钮右侧的"×"直接关闭小程序（首选）
+   - 若看不到"×"，点击"···"打开菜单后选关闭
+   - 不要点左上角"<"，那只是小程序内部返回，无法退出小程序
+4. 如果是正常跳转的原生新页面 → 点击左上角返回按钮、或关闭按钮（×）
 
 每次只输出一个动作（先处理弹窗，弹窗没了再考虑页面导航）。
 
@@ -162,11 +166,23 @@ def infer_back_action(before_png: bytes, after_png: bytes | None, nav_context: s
         ]),
     ]
     action = invoke_structured(llm, messages, BackAction)
+    print(f"    [LLM raw] can_go_back={action.can_go_back}  "
+          f"({action.back_x:.0f},{action.back_y:.0f})  {action.method}")
     if not action.can_go_back:
         return None
     if not is_valid_tap(action.back_x, action.back_y):
+        print(f"    [LLM] 坐标 ({action.back_x:.0f},{action.back_y:.0f}) 越界，无效")
         return None
     return action
+
+
+def _llm_log_entry(action: BackAction | None, reason: str = "") -> dict:
+    """Build a log fragment capturing the raw LLM response."""
+    if action is None:
+        return {"llm_can_go_back": False, "llm_method": reason,
+                "llm_x": -1, "llm_y": -1}
+    return {"llm_can_go_back": action.can_go_back, "llm_method": action.method,
+            "llm_x": round(action.back_x), "llm_y": round(action.back_y)}
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +356,8 @@ def _execute_tap_tiers(
     if llm_action is None:
         print("    [LLM] 未能识别返回动作")
         log.append({"strategy": "LLM", "result": "未能识别返回动作",
-                    "success": False, "screenshot": ""})
+                    "success": False, "screenshot": "",
+                    **_llm_log_entry(None, "can_go_back=False 或坐标越界")})
         return None
 
     llm_result = tap_llm_back(client, llm_action)
@@ -351,12 +368,14 @@ def _execute_tap_tiers(
             lambda: llm_result, log, save_path,
         )
         if result is not None:
+            log[-1].update(_llm_log_entry(llm_action))
             return result
     else:
         bx, by = llm_action.back_x, llm_action.back_y
         print(f"    [LLM] {llm_action.method}({bx:.0f},{by:.0f}) → 无效坐标")
         log.append({"strategy": "LLM", "coords": [round(bx), round(by)],
-                    "result": "未变化", "success": False, "screenshot": ""})
+                    "result": "无效坐标", "success": False, "screenshot": "",
+                    **_llm_log_entry(llm_action)})
 
     # ── Tier 4: LLM + YOLO ──
     # Calibrate LLM output by finding nearest icon to LLM coordinates
@@ -375,16 +394,19 @@ def _execute_tap_tiers(
                     lambda: (client.tap(lx, ly), (lx, ly))[1], log, save_path,
                 )
                 if result is not None:
+                    log[-1].update(_llm_log_entry(llm_action))
                     return result
             else:
                 print(f"    [LLM+YOLO] LLM坐标({llm_action.back_x:.0f},{llm_action.back_y:.0f})附近无YOLO检测结果")
                 log.append({"strategy": "LLM+YOLO",
-                            "result": f"LLM坐标附近无检测结果",
-                            "success": False, "screenshot": ""})
+                            "result": "LLM坐标附近无检测结果",
+                            "success": False, "screenshot": "",
+                            **_llm_log_entry(llm_action)})
         else:
             print("    [LLM+YOLO] YOLO检测失败")
             log.append({"strategy": "LLM+YOLO", "result": "YOLO检测失败",
-                        "success": False, "screenshot": ""})
+                        "success": False, "screenshot": "",
+                        **_llm_log_entry(llm_action)})
     else:
         print("    [LLM+YOLO] 无LLM输出可供校正")
         log.append({"strategy": "LLM+YOLO", "result": "无LLM输出",
@@ -440,6 +462,7 @@ def return_to_initial(
         return tried
 
     current_bytes = before_back_bytes or initial_bytes
+    consecutive_unknown = 0  # 连续未知页计数，超过阈值直接跳 LLM
 
     for _ in range(max_rounds):
         tried = _get_tried(current_bytes)
@@ -448,8 +471,11 @@ def return_to_initial(
             print("    [nav] 当前页面所有策略均已尝试，放弃")
             break
 
-        skip_mechanical = "mechanical" in tried
-        if skip_mechanical:
+        # 连续多次落入未知页（如小程序内部跳转），跳过 mechanical 直接用 LLM
+        skip_mechanical = "mechanical" in tried or consecutive_unknown >= 2
+        if "mechanical" not in tried and consecutive_unknown >= 2:
+            print(f"    [nav] 连续 {consecutive_unknown} 次未知页，跳过机械策略直接调用 LLM")
+        elif skip_mechanical:
             print("    [nav] 当前页面已试过机械回退，直接调用 LLM")
 
         prev_log_len = len(log)
@@ -477,6 +503,7 @@ def return_to_initial(
         # Phase 2: assess where we ended up
         matched_level = _match_stack(id_comp, nav_stack, back_bytes)
         if matched_level >= 0:
+            consecutive_unknown = 0
             is_initial = matched_level == top_level
             sim = id_comp.raw_similarity(nav_stack[matched_level][0], back_bytes)
             level_desc = "initial" if is_initial else f"L{matched_level}"
@@ -491,6 +518,7 @@ def return_to_initial(
                                   log=log, tap_index=tap_index, out_dir=out_dir)
             return True, log
 
+        consecutive_unknown += 1
         # Unknown page — check if it's a parallel page
         sim_to_initial = id_comp.raw_similarity(initial_bytes, back_bytes)
 

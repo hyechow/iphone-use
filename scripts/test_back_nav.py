@@ -139,6 +139,8 @@ def main() -> None:
         print("="*60)
         root_png = screenshot()
         nav_stack: list[tuple[bytes, tuple[float, float] | None]] = [(root_png, None)]
+        # tap_labels[i] = label of element tapped to go from L_i → L_{i+1}
+        tap_labels: list[str] = []
         current_png = root_png
 
         # Navigate down
@@ -179,6 +181,7 @@ def main() -> None:
             prev_png, _ = nav_stack[-1]
             nav_stack[-1] = (prev_png, (lx, ly))
             nav_stack.append((after_png, None))
+            tap_labels.append(label)
             current_png = after_png
 
             if depth == MAX_DEPTH:
@@ -205,13 +208,33 @@ def main() -> None:
         # To go back n levels: target = nav_stack[-n-1], so pass nav_stack[:-n].
         target_stack = nav_stack[:-back_n]
 
+        # nav_context = how we got FROM the target level INTO the next level
+        # = tap_labels[target_level], where target_level = depth_reached - back_n
+        target_level = depth_reached - back_n
+        nav_context = tap_labels[target_level] if target_level < len(tap_labels) else ""
+
         print(f"\n{'='*60}")
-        print(f"  [回退测试] 当前深度 L{depth_reached}，回退 {back_n} 层 → L{depth_reached - back_n}")
+        print(f"  [回退测试] 当前深度 L{depth_reached}，回退 {back_n} 层 → L{target_level}")
+        if nav_context:
+            print(f"  nav_context: 「{nav_context}」")
         print("="*60)
         for i in range(len(target_stack)):
             coords = target_stack[i][1]
             target_mark = " ← 目标" if i == len(target_stack) - 1 else ""
             print(f"  L{i}: {'→ ' + str(coords) if coords else '(无 forward 坐标)'}{target_mark}")
+
+        # Prepare debug output dir
+        import json, tempfile, datetime
+        out_dir = Path(tempfile.gettempdir()) / f"back_nav_{datetime.datetime.now():%H%M%S}"
+        out_dir.mkdir()
+        print(f"  调试目录: {out_dir}")
+
+        # Save nav_stack reference screenshots so we can see what each level looks like
+        for i in range(len(target_stack)):
+            ref_png = target_stack[i][0]
+            ref_path = out_dir / f"ref_L{i}{'_target' if i == len(target_stack)-1 else ''}.png"
+            ref_path.write_bytes(ref_png)
+        print(f"  参考截图: ref_L0.png … ref_L{len(target_stack)-1}_target.png")
 
         print()
         before_back = screenshot()
@@ -220,7 +243,22 @@ def main() -> None:
             screenshot=screenshot,
             nav_stack=target_stack,
             before_back_bytes=before_back,
+            out_dir=out_dir,
+            nav_context=nav_context,
         )
+
+        # Save structured log
+        log_data = {
+            "success": success,
+            "depth_reached": depth_reached,
+            "back_n": back_n,
+            "target_level": depth_reached - back_n,
+            "nav_context": nav_context,
+            "steps": log,
+        }
+        log_path = out_dir / "log.json"
+        log_path.write_text(json.dumps(log_data, ensure_ascii=False, indent=2))
+        print(f"  日志已保存: {log_path}")
 
         print(f"\n{'='*60}")
         target_level = depth_reached - back_n
@@ -231,8 +269,10 @@ def main() -> None:
             r = entry.get("result", "")
             score = entry.get("score", "")
             score_str = f" ({score:.3f})" if isinstance(score, float) else ""
+            llm_method = entry.get("llm_method", "")
+            llm_str = f"  [LLM: {llm_method}]" if llm_method else ""
             mark = "✓" if entry.get("success") else "·"
-            print(f"  {mark} [{i+1:02d}] {s:12s} → {r}{score_str}")
+            print(f"  {mark} [{i+1:02d}] {s:12s} → {r}{score_str}{llm_str}")
 
 
 if __name__ == "__main__":
