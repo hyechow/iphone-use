@@ -54,11 +54,13 @@ class ReconResult:
     description: str
     elements_count: int
     initial_screenshot_path: str = ""
+    parent_page: str = ""
     taps: list[TapResult] = field(default_factory=list)
 
     def save(self, path: Path) -> None:
         data = {
             "description": self.description,
+            "parent_page": self.parent_page,
             "elements_count": self.elements_count,
             "initial_screenshot": self.initial_screenshot_path,
             "taps": [

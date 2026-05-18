@@ -39,7 +39,7 @@ def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
 
     Phone must be on the root page.
     mode: None=initial, "add"=add to existing app, "update"=re-probe target page.
-    target_dir: required for "update" mode, the page directory name to overwrite.
+    target_dir: add=parent page dir name; update=page dir to overwrite.
     Returns tree of explored pages (children attached).
     """
     from policy_expr.recon.page_parser import PageParser
@@ -60,8 +60,14 @@ def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
     page_name = _page_name_from_desc(knowledge.page.description)
 
     # update mode: use target_dir as page_name and out_dir
+    inherited_parent: str = ""
     if mode == "update" and target_dir:
         page_name = target_dir
+        # Inherit parent_page from existing recon_result to avoid overwriting it
+        old_result = app_log_dir / page_name / "recon_result.json"
+        if old_result.exists():
+            import json as _json
+            inherited_parent = _json.loads(old_result.read_text("utf-8")).get("parent_page", "")
 
     nav_stack: list[tuple[bytes, tuple[float, float] | None]] = [(png_bytes, None)]
 
@@ -75,9 +81,11 @@ def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
     # Map root's empty chain to page name so children can find their parent
     chain_to_page[()] = page_name
 
+    _root_parent = target_dir if mode == "add" else (inherited_parent or None)
     root_node = DfsPageNode(
         page_name=page_name,
-        parent=None, via_tap=None, depth=0,
+        parent=_root_parent,
+        via_tap=None, depth=0,
         nav_chain=[], out_dir=app_log_dir / page_name,
     )
 
@@ -145,6 +153,7 @@ def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
             phone, knowledge, png_bytes, root_node.out_dir,
             sample=sample, nav_stack=nav_stack,
             on_element_tapped=_on_root_element_tapped,
+            parent_page=root_node.parent or "",
         )
         _update_recon_log(app_log_dir, page_name, mode or "initial")
     except ProbeAbortedError as e:
@@ -395,6 +404,7 @@ def _dfs_recursive(
                 phone, knowledge, png_bytes, out_dir,
                 sample=sample, nav_stack=nav_stack,
                 on_element_tapped=_on_element_tapped,
+                parent_page=node.parent or "",
             )
             _update_recon_log(app_log_dir, page_name, "initial")
         except ProbeAbortedError as e:
@@ -405,30 +415,6 @@ def _dfs_recursive(
 
     # POST: phone on this page
     return node, dedup_info
-
-
-def generate_knowledge_postorder(nodes: list[DfsPageNode], app: str) -> None:
-    """Walk tree post-order (children before parents), generate knowledge bottom-up."""
-    from policy_expr.recon_cli import _check_knowledge_exists, run_knowledge, run_learn
-
-    total = _count_nodes(nodes)
-    generated = [0]
-
-    def _visit(node: DfsPageNode):
-        # Children first
-        for child in node.children:
-            _visit(child)
-
-        # Then this node
-        if node.recon_result and not node.knowledge_generated:
-            run_learn(node.out_dir / "recon_result.json")
-            run_knowledge(node.out_dir)
-            node.knowledge_generated = True
-            generated[0] += 1
-            print(f"  [{generated[0]}/{total}] 知识生成: {node.page_name}")
-
-    for node in nodes:
-        _visit(node)
 
 
 # ---------------------------------------------------------------------------
@@ -491,7 +477,8 @@ def _close_miniprogram(phone, knowledge) -> None:
 def _probe_page_dfs(phone, knowledge, png_bytes, out_dir: Path,
                     sample: int = 0,
                     nav_stack: list | None = None,
-                    on_element_tapped: callable | None = None) -> tuple:
+                    on_element_tapped: callable | None = None,
+                    parent_page: str = "") -> tuple:
     """DFS-style incremental probing: tap each element one by one, with callback after each tap.
 
     Args:
@@ -526,6 +513,7 @@ def _probe_page_dfs(phone, knowledge, png_bytes, out_dir: Path,
         description=page.description,
         elements_count=len(page.interactive_elements),
         initial_screenshot_path=str(out_dir / "initial.png"),
+        parent_page=parent_page,
     )
 
     # Save initial screenshot

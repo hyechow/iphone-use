@@ -164,6 +164,37 @@ def img_to_bytes(img: Image.Image) -> bytes:
     return buf.getvalue()
 
 
+# ── JSON renderer ──────────────────────────────────────────
+
+def _json_val_html(v) -> str:
+    if v is None:
+        return '<span class="jv-null">null</span>'
+    if isinstance(v, bool):
+        return f'<span class="jv-bool">{"true" if v else "false"}</span>'
+    if isinstance(v, (int, float)):
+        return f'<span class="jv-num">{v}</span>'
+    if isinstance(v, str):
+        safe = v.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return f'<span class="jv-str">"{safe}"</span>'
+    return str(v)
+
+
+def _render_identity_json(identity: dict) -> str:
+    items = list(identity.items())
+    rows = ""
+    for i, (k, v) in enumerate(items):
+        comma = "," if i < len(items) - 1 else ""
+        rows += (
+            f'<div class="jrow">'
+            f'<span class="jk">"{k}"</span>'
+            f'<span class="jpunct">: </span>'
+            f'{_json_val_html(v)}'
+            f'<span class="jpunct">{comma}</span>'
+            f'</div>'
+        )
+    return f'<div class="jobj"><span class="jpunct">{{</span>{rows}<span class="jpunct">}}</span></div>'
+
+
 # ── Runner data classes ────────────────────────────────────────
 
 @dataclass
@@ -275,44 +306,6 @@ def _build_nav_tree(pages: list[ReconPageInfo], trace: list[dict] | None = None)
                 child.via_tap = via_tap
                 parent.children.append(child)
                 has_parent.add(page_name)
-        # When BFS trace is available, only show BFS-explored pages in the tree.
-        # Flow targets are AI-generated names that may not match BFS page names,
-        # can include back-navigation (parent pages), and cause duplicate/misplaced nodes.
-    else:
-        # Fallback: infer from page_flows.json with fuzzy name matching
-        known: dict[str, ReconPageInfo] = {}
-        for p in pages:
-            known[p.name] = p
-            known[p.title] = p
-            clean = re.sub(r'\s*\(\d+\)\s*$', '', p.title).strip()
-            if clean:
-                known[clean] = p
-
-        def _match(target: str) -> ReconPageInfo | None:
-            if target in known:
-                return known[target]
-            for key, page in known.items():
-                if target in key or key in target:
-                    return page
-            return None
-
-        for page in pages:
-            parent = node_map[page.name]
-            seen: set[str] = set()
-            for flow in page.flows:
-                target = flow.target_page
-                if target in seen:
-                    continue
-                seen.add(target)
-                matched = _match(target)
-                if matched and matched.name != page.name:
-                    child = node_map[matched.name]
-                    if child not in parent.children:
-                        parent.children.append(child)
-                        has_parent.add(matched.name)
-                else:
-                    parent.children.append(NavNode(name=target, page=None))
-
     return [node_map[p.name] for p in pages if p.name not in has_parent]
 
 
@@ -477,28 +470,26 @@ class ReconReportBuilder:
 
             result_path = pd / "recon_result.json"
             result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else {}
-            if result:
-                app_name = result.get("app_name", app_name)
 
-            # Page identity — prefer recon_result, fall back to initial_result
-            page_type = result.get("page_type", "")
-            signature = result.get("signature", "")
-            elements_count = result.get("elements_count", 0)
-            page_title = result.get("page_title", pd.name)
+            # Page identity: prefer page_meta.json (exported), fall back to initial_result.json
+            page_type = ""
+            page_title = pd.name
             description = result.get("description", "")
 
-            init_result_path = pd / "initial_result.json"
-            if init_result_path.exists():
-                init_result = json.loads(init_result_path.read_text(encoding="utf-8"))
-                identity = init_result.get("page", {}).get("identity", {})
-                if not page_type:
-                    page_type = identity.get("page_type", "")
-                if not signature:
-                    signature = identity.get("signature", "")
-                if not page_title or page_title == pd.name:
-                    page_title = identity.get("page_title", pd.name)
-                if not description:
-                    description = init_result.get("page", {}).get("description", "")
+            meta_path = pd / "page_meta.json"
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                page_title = meta.get("page_title", pd.name)
+                page_type = meta.get("page_type", "")
+                description = meta.get("description", description)
+            else:
+                init_result_path = pd / "initial_result.json"
+                if init_result_path.exists():
+                    init_data = json.loads(init_result_path.read_text(encoding="utf-8"))
+                    description = description or init_data.get("page", {}).get("description", "")
+
+            elements_count = result.get("elements_count", 0)
+            signature = ""
 
             # Annotate screenshot with tap points, save to disk (not embedded in HTML).
             initial_img = _load_img(initial_path)
@@ -601,18 +592,6 @@ class ReconReportBuilder:
                     identity=tap.get("identity", {}),
                 ))
 
-            # Load flows
-            flows: list[ReconFlow] = []
-            flows_path = pd / "page_flows.json"
-            if flows_path.exists():
-                flows_data = json.loads(flows_path.read_text(encoding="utf-8"))
-                for f in flows_data.get("flows", []):
-                    flows.append(ReconFlow(
-                        target_page=f.get("target_page", ""),
-                        target_description=f.get("target_description", ""),
-                        flow_description=f.get("flow_description", ""),
-                    ))
-
             # Load knowledge
             knowledge = ""
             knowledge_path = pd / "knowledge.md"
@@ -655,7 +634,7 @@ class ReconReportBuilder:
                 signature=signature,
                 annotated_url=annotated_url,
                 taps=taps,
-                flows=flows,
+                flows=[],
                 knowledge=knowledge,
                 error=page_error,
                 error_annotated_url=error_annotated_url,
@@ -897,40 +876,52 @@ RECON_HTML_TEMPLATE = """\
   /* ── Section labels ── */
   .section-label {{ font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }}
 
-  /* ── Tap table ── */
-  .tap-table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
-  .tap-table tr {{ border-bottom: 1px solid var(--border); }}
-  .tap-table tr:last-child {{ border-bottom: none; }}
-  .tap-table td {{ padding: 6px 4px; vertical-align: middle; }}
-  .tap-num {{ width: 24px; text-align: center; font-size: 11px; font-weight: 600; color: var(--muted); }}
-  .tap-label {{ font-weight: 500; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-  .tap-status {{ font-size: 12px; }}
-  .tap-nav {{ color: var(--green); }}
-  .tap-none {{ color: var(--gray); }}
-  .tap-target {{
-    font-size: 11px; color: #15803d; background: #f0fdf4;
-    padding: 1px 6px; border-radius: 8px; margin-left: 4px;
-    border: 1px solid #bbf7d0; white-space: nowrap;
+  /* ── Tap list ── */
+  .tap-list {{ display: flex; flex-direction: column; }}
+  .tap-item {{ padding: 7px 2px; border-bottom: 1px solid var(--border); }}
+  .tap-item:last-child {{ border-bottom: none; }}
+  .tap-item-main {{ display: flex; align-items: center; gap: 8px; min-width: 0; }}
+  .tap-item-detail {{
+    margin-top: 4px; margin-left: 30px;
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   }}
+  .tap-num {{ width: 22px; flex-shrink: 0; text-align: center; font-size: 11px; font-weight: 600; color: var(--muted); }}
+  .tap-label {{ font-size: 13px; font-weight: 500; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+  .tap-nav {{ font-size: 12px; color: var(--green); flex-shrink: 0; }}
+  .tap-none {{ font-size: 12px; color: var(--gray); flex-shrink: 0; }}
   .tap-identity {{
-    font-size: 10px; padding: 1px 6px; border-radius: 8px; margin-left: 4px; white-space: nowrap;
+    font-size: 11px; padding: 1px 7px; border-radius: 8px; flex-shrink: 0;
   }}
-  .tap-identity-new {{
-    background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe;
-  }}
-  .tap-identity-dup {{
-    background: #fefce8; color: #a16207; border: 1px solid #fde68a;
-  }}
-  .tap-identity-scores {{
-    font-size: 10px; color: #94a3b8; font-family: monospace; margin-left: 4px;
-  }}
-  .flow-extra-row td {{ color: var(--muted); font-style: italic; }}
+  .tap-identity-new {{ background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }}
+  .tap-identity-dup {{ background: #fefce8; color: #a16207; border: 1px solid #fde68a; }}
+  .tap-identity-desc {{ font-size: 11px; color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }}
+  .tap-identity-scores {{ font-size: 11px; color: #94a3b8; font-family: monospace; flex-shrink: 0; }}
   .tap-preview-btn {{
     font-size: 11px; padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border);
-    background: var(--bg); color: var(--muted); cursor: pointer;
-    transition: all 0.15s; white-space: nowrap;
+    background: var(--bg); color: var(--muted); cursor: pointer; flex-shrink: 0;
+    transition: all 0.15s; white-space: nowrap; margin-left: auto;
   }}
   .tap-preview-btn:hover {{ background: #dbeafe; border-color: #93c5fd; color: #1d4ed8; }}
+
+  /* ── Identity JSON panel ── */
+  .tap-identity {{ cursor: pointer; user-select: none; }}
+  .tap-identity::after {{ content: " ▾"; font-size: 9px; opacity: 0.6; }}
+  .tap-identity.open::after {{ content: " ▴"; }}
+  .tap-json-panel {{
+    display: none; margin: 6px 0 2px 30px;
+    background: #f8fafc; border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 12px; font-family: "SF Mono", "Fira Code", monospace; font-size: 11px;
+    line-height: 1.7;
+  }}
+  .tap-json-panel.show {{ display: block; }}
+  .jobj {{ display: flex; flex-direction: column; gap: 0; }}
+  .jrow {{ padding-left: 14px; }}
+  .jk {{ color: #7c3aed; }}
+  .jpunct {{ color: #94a3b8; }}
+  .jv-str {{ color: #16a34a; }}
+  .jv-num {{ color: #2563eb; }}
+  .jv-bool {{ color: #d97706; }}
+  .jv-null {{ color: #94a3b8; font-style: italic; }}
 
   /* ── Error banner ── */
   .error-banner {{
@@ -1125,6 +1116,11 @@ function closeModal(e) {{
 document.addEventListener('keydown', function(e) {{
   if (e.key === 'Escape') document.getElementById('modal').classList.remove('show');
 }});
+function toggleIdentity(id, chip) {{
+  var panel = document.getElementById(id);
+  var show = panel.classList.toggle('show');
+  chip.classList.toggle('open', show);
+}}
 </script>
 </body>
 </html>
@@ -1173,37 +1169,34 @@ def _render_page_card_html(node: NavNode, path: list[str]) -> str:
     tap_rows = ""
     seq_scripts = ""
     for tap in page.taps:
-        # Build identity chip
+        # Build identity chip (clickable → expands JSON panel)
         identity_html = ""
+        identity_json_panel = ""
         ident = tap.identity
         if ident and tap.navigated:
             is_new = ident.get("is_new", True)
             phase = ident.get("phase", "")
-            vis = ident.get("visual_sim")
-            txt = ident.get("text_sim")
             matched_name = ident.get("matched_name")
+            json_id = f"ident-{_slug(page.name)}-{tap.index}"
+            json_html = _render_identity_json(ident)
+            identity_json_panel = f'<div class="tap-json-panel" id="{json_id}">{json_html}</div>'
+
             if is_new:
                 phase_label = {"new_page": "新页面", "visual_shortcut": "新页面", "text_match": "新页面"}.get(phase, phase)
-                identity_html = f'<span class="tap-identity tap-identity-new">✦ {phase_label}</span>'
+                identity_html = (
+                    f'<span class="tap-identity tap-identity-new"'
+                    f' onclick="toggleIdentity(\'{json_id}\', this)">✦ {phase_label}</span>'
+                )
             else:
                 phase_label = {"visual_shortcut": "视觉命中", "text_match": "语义命中"}.get(phase, phase)
-                detail = f"→ {matched_name}" if matched_name else ""
-                identity_html = f'<span class="tap-identity tap-identity-dup">⟳ {phase_label} {detail}</span>'
-            scores = []
-            if vis is not None:
-                scores.append(f"vis={vis:.2f}")
-            if txt is not None:
-                scores.append(f"txt={txt:.2f}")
-            if scores:
-                identity_html += f'<span class="tap-identity-scores">{" ".join(scores)}</span>'
+                identity_html = (
+                    f'<span class="tap-identity tap-identity-dup"'
+                    f' onclick="toggleIdentity(\'{json_id}\', this)">⟳ {phase_label}</span>'
+                )
 
         if tap.navigated:
-            matched = flow_by_tap.get(tap.index)
-            target_chip = f'<span class="tap-target">→ {matched.target_page}</span>' if matched else ''
-            status_html = f'<span class="tap-nav">✓ 导航成功</span>{target_chip}{identity_html}'
             seq_key = f"{_slug(page.name)}-{tap.index}"
             if len(tap.back_seq) > 1:
-                # Full sequence available — emit JS and use openSeq button
                 import json as _json
                 seq_json = _json.dumps(tap.back_seq)
                 seq_scripts += f'_seqs[{_json.dumps(seq_key)}]={seq_json};\n'
@@ -1220,24 +1213,33 @@ def _render_page_card_html(node: NavNode, path: list[str]) -> str:
                 )
             else:
                 btn = ""
+
+            tap_rows += f"""
+            <div class="tap-item">
+              <div class="tap-item-main">
+                <span class="tap-num">{tap.index}</span>
+                <span class="tap-label" title="{tap.label}">{tap.label or "—"}</span>
+                <span class="tap-nav">✓ 导航成功</span>
+                {btn}
+              </div>
+              {"<div class='tap-item-detail'>" + identity_html + "</div>" if identity_html else ""}
+              {identity_json_panel}
+            </div>"""
         else:
-            status_html = '<span class="tap-none">— 无变化</span>'
-            btn = ""
-        tap_rows += f"""
-            <tr>
-              <td class="tap-num">{tap.index}</td>
-              <td class="tap-label" title="{tap.label}">{tap.label or "—"}</td>
-              <td class="tap-status">{status_html}</td>
-              <td>{btn}</td>
-            </tr>"""
+            tap_rows += f"""
+            <div class="tap-item">
+              <div class="tap-item-main">
+                <span class="tap-num">{tap.index}</span>
+                <span class="tap-label" title="{tap.label}">{tap.label or "—"}</span>
+                <span class="tap-none">— 无变化</span>
+              </div>
+            </div>"""
 
     nav_count = sum(1 for t in page.taps if t.navigated)
-    matched_flows_count = len(used_flows)
-    flows_label = f" · {matched_flows_count} 条路径" if matched_flows_count else ""
     tap_section = f"""
         <div>
-          <div class="section-label">点击探测 ({nav_count}/{len(page.taps)} 导航成功{flows_label})</div>
-          <table class="tap-table">{tap_rows}</table>
+          <div class="section-label">点击探测 ({nav_count}/{len(page.taps)} 导航成功)</div>
+          <div class="tap-list">{tap_rows}</div>
         </div>"""
 
     flows_section = ""
@@ -1261,9 +1263,8 @@ def _render_page_card_html(node: NavNode, path: list[str]) -> str:
           {breadcrumb_html}
           <div class="page-card-header">
             <h2>{page.title}</h2>
-            <span class="type-badge">{type_label}</span>
+            {f'<span class="type-badge">{type_label}</span>' if type_label else ''}
             {via_html}
-            <span class="page-sig">{page.signature}</span>
           </div>
           {'<div class="page-card-desc">' + page.description + '</div>' if page.description else ''}
           {_render_error_html(page.error, page.error_annotated_url)}
