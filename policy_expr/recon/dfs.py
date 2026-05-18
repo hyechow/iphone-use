@@ -10,7 +10,7 @@ from policy_expr.executor import logical_xy
 from policy_expr.perception import try_resume_mac
 from policy_expr.recon.back_nav import manual_recover as _manual_recover
 from policy_expr.recon.back_nav import return_to_initial
-from policy_expr.recon.page_dedup import PageDedup
+from policy_expr.recon.page_identity import PageIdentity
 from policy_expr.recon.utils import ProbeAbortedError
 from policy_expr.trace import Tracer
 
@@ -46,7 +46,7 @@ def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
     tracer = Tracer()
     trace_path = app_log_dir / "trace.json"
     visited_page_entries: list[tuple[str, bytes]] = []
-    dedup = PageDedup(get_matcher())
+    dedup = PageIdentity(get_matcher())
     chain_to_page: dict[tuple, str] = {}
 
     # Parse root page identity
@@ -152,7 +152,7 @@ def _dfs_explore_children(
     nav_stack: list[tuple[bytes, tuple[float, float] | None]],
     root_ctx: tuple,
     chain_to_page: dict[tuple, str],
-    dedup: PageDedup,
+    dedup: PageIdentity,
     tracer: Tracer,
     trace_path: Path,
     app_log_dir: Path,
@@ -217,7 +217,7 @@ def _dfs_recursive(
     nav_stack: list[tuple[bytes, tuple[float, float] | None]],
     root_ctx: tuple,
     chain_to_page: dict[tuple, str],
-    dedup: "PageDedup",
+    dedup: "PageIdentity",
     visited_page_entries: list[tuple[str, bytes]],
     tracer: Tracer,
     trace_path: Path,

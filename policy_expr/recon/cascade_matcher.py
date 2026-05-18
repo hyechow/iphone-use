@@ -35,7 +35,7 @@ class CascadeMatcher:
     """Holds GUIClip and bge-small-zh models; generates and compares page embeddings.
 
     All three sub-models (GUIClip, bge, LLM client) are loaded lazily on first use.
-    Intended to be created once and shared across PageDedup and PageComparator.
+    Intended to be created once and shared across PageIdentity and PageComparator.
     """
 
     def __init__(

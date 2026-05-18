@@ -1,10 +1,10 @@
-"""Stateful page library for exploration dedup: semantic-primary cascade.
+"""Page identity: determine whether a page is new or already known.
 
 Cascade logic (OR):
   1. Visual embedding (GUIClip, fast, no LLM).
-     - If max_visual >= visual_shortcut → duplicate (save LLM call).
+     - If max_visual >= visual_shortcut → known page (save LLM call).
   2. Text embedding (bge-small-zh via LLM fingerprint).
-     - If max_text >= text_threshold → duplicate.
+     - If max_text >= text_threshold → known page.
      - Otherwise → new page, add to library.
 """
 
@@ -16,7 +16,7 @@ from policy_expr.recon.cascade_matcher import CascadeMatcher, PageEmbedding
 
 
 @dataclass
-class DedupResult:
+class IdentityResult:
     is_duplicate: bool
     reason: str
     best_visual_sim: float = 0.0
@@ -27,8 +27,8 @@ class DedupResult:
     phase: str = ""  # "visual_shortcut" / "text_match" / "new_page"
 
 
-class PageDedup:
-    """Semantic-primary page dedup for BFS/DFS exploration."""
+class PageIdentity:
+    """Semantic-primary page identity for BFS/DFS exploration."""
 
     def __init__(
         self,
@@ -44,11 +44,11 @@ class PageDedup:
     def __len__(self) -> int:
         return len(self._library)
 
-    def check(self, png: bytes, precomputed: PageEmbedding | None = None) -> DedupResult:
-        """Check if png is a duplicate of any page in the library."""
+    def check(self, png: bytes, precomputed: PageEmbedding | None = None) -> IdentityResult:
+        """Check if png is a known page in the library."""
         n = len(self._library)
         if n == 0:
-            return DedupResult(False, "empty_library", library_size=0, phase="new_page")
+            return IdentityResult(False, "empty_library", library_size=0, phase="new_page")
 
         # Phase 1: visual (fast, no LLM)
         candidate = precomputed or self._matcher.embed_visual(png)
@@ -57,7 +57,7 @@ class PageDedup:
         max_vis = vis_sims[best_idx]
 
         if max_vis >= self._vs:
-            return DedupResult(
+            return IdentityResult(
                 True, f"visual_shortcut({max_vis:.3f})",
                 max_vis, matched_index=best_idx,
                 matched_name=self._library[best_idx][2],
@@ -74,14 +74,14 @@ class PageDedup:
         max_txt = txt_sims[txt_best_idx]
 
         if max_txt >= self._tt:
-            return DedupResult(
+            return IdentityResult(
                 True, f"text_match({max_txt:.3f})",
                 max_vis, max_txt, matched_index=txt_best_idx,
                 matched_name=self._library[txt_best_idx][2],
                 library_size=n, phase="text_match",
             )
 
-        return DedupResult(
+        return IdentityResult(
             False, f"no_match(vis={max_vis:.3f},txt={max_txt:.3f})",
             max_vis, max_txt, library_size=n, phase="new_page",
         )
@@ -93,8 +93,8 @@ class PageDedup:
         self._library.append((emb, png, name))
         return emb
 
-    def check_and_add(self, png: bytes, name: str = "") -> DedupResult:
-        """Check for duplicate; add to library only if not a duplicate."""
+    def check_and_add(self, png: bytes, name: str = "") -> IdentityResult:
+        """Check for identity; add to library only if not a known page."""
         result = self.check(png)
         if not result.is_duplicate:
             self.add(png, name)
