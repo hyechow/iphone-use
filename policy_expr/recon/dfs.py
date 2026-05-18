@@ -9,8 +9,8 @@ from pathlib import Path
 from policy_expr.executor import logical_xy
 from policy_expr.perception import try_resume_mac
 from policy_expr.recon.back_nav import manual_recover as _manual_recover
-from policy_expr.recon.bfs import probe_elements
 from policy_expr.recon.back_nav import return_to_initial
+from policy_expr.recon.page_dedup import PageDedup
 from policy_expr.recon.utils import ProbeAbortedError
 from policy_expr.trace import Tracer
 
@@ -31,22 +31,22 @@ class DfsPageNode:
 
 
 def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
-                sample: int = 0, similarity_threshold: float = 0.5) -> list[DfsPageNode]:
+                sample: int = 0) -> list[DfsPageNode]:
     """Top-level DFS exploration.
 
     Phone must be on the root page.
     Returns tree of explored pages (children attached).
     """
     from policy_expr.recon.page_parser import PageParser
-    from policy_expr.recon.page_compare import make_comparator
+    from policy_expr.recon.cascade_matcher import get_matcher
 
     app = app_log_dir.name
+    app_log_dir.mkdir(parents=True, exist_ok=True)
+
     tracer = Tracer()
     trace_path = app_log_dir / "trace.json"
-    visited_screenshots: list[bytes] = []
     visited_page_entries: list[tuple[str, bytes]] = []
-    from policy_expr.recon.back_nav import _get_identity_comp
-    id_comp = _get_identity_comp()
+    dedup = PageDedup(get_matcher())
     chain_to_page: dict[tuple, str] = {}
 
     # Parse root page identity
@@ -57,7 +57,8 @@ def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
     nav_stack: list[tuple[bytes, tuple[float, float] | None]] = [(png_bytes, None)]
 
     # Record root
-    visited_screenshots.append(png_bytes)
+    print(f"  [已探测 0 页] ✓ 根页面 — {page_name}")
+    dedup.add(png_bytes, name=page_name)
     visited_page_entries.append((page_name, png_bytes))
     tracer.record_page(page_name, None, None, 0)
     tracer.save(trace_path)
@@ -93,9 +94,9 @@ def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
         child_nav_stack = nav_stack[:-1] + [(parent_bytes, (lx, ly)), (after_bytes, None)]
 
         # Recursive DFS into child
-        child_node = _dfs_recursive(
+        child_node, child_dedup = _dfs_recursive(
             phone, child_chain, child_nav_stack, root_ctx,
-            chain_to_page, visited_screenshots, visited_page_entries, id_comp, tracer, trace_path,
+            chain_to_page, dedup, visited_page_entries, tracer, trace_path,
             app_log_dir, max_depth - 1, sample,
         )
 
@@ -121,8 +122,11 @@ def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
                     back_attempts=back_log,
                 )
 
-        # Update tap result with back attempts
+        # Update tap result
+        tap_result.child_status = _child_status(child_node, max_depth - 1)
         tap_result.back_attempts = back_log
+        if child_dedup:
+            tap_result.identity = child_dedup
 
         return True  # Continue probing next element
 
@@ -139,18 +143,6 @@ def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
 
     # DFS into children is now handled inside _probe_page_dfs via callback
 
-    # Post-exploration: pairwise similarity report
-    if len(visited_page_entries) > 1:
-        compute_pairwise_similarity(
-            visited_page_entries,
-            threshold=similarity_threshold,
-            save_path=app_log_dir / "similarity_report.json",
-        )
-
-    # Post-exploration: transition graph
-    from policy_expr.recon.viz_transitions import generate_transition_graph
-    generate_transition_graph(trace_path, app_log_dir / "transition_graph.html")
-
     return [root_node]
 
 
@@ -160,8 +152,7 @@ def _dfs_explore_children(
     nav_stack: list[tuple[bytes, tuple[float, float] | None]],
     root_ctx: tuple,
     chain_to_page: dict[tuple, str],
-    visited_screenshots: list[bytes],
-    id_comp,
+    dedup: PageDedup,
     tracer: Tracer,
     trace_path: Path,
     app_log_dir: Path,
@@ -169,9 +160,6 @@ def _dfs_explore_children(
     sample: int,
 ) -> None:
     """DFS into navigated children of node. Phone is on node's page."""
-    from policy_expr.recon_cli import _check_knowledge_exists
-
-    app = app_log_dir.name
     navigated_taps = [t for t in node.recon_result.taps if t.tap_ok and t.navigated]
     if not navigated_taps:
         return
@@ -194,10 +182,9 @@ def _dfs_explore_children(
         child_nav_stack = nav_stack[:-1] + [(parent_bytes, (lx, ly)), (child_bytes, None)]
 
         # 3. Recursive DFS into child
-        child_node = _dfs_recursive(
+        child_node, _ = _dfs_recursive(
             phone, child_chain, child_nav_stack, root_ctx,
-            chain_to_page, visited_screenshots, [],
-            id_comp, tracer, trace_path,
+            chain_to_page, dedup, [], tracer, trace_path,
             app_log_dir, remaining_depth - 1, sample,
         )
 
@@ -230,23 +217,26 @@ def _dfs_recursive(
     nav_stack: list[tuple[bytes, tuple[float, float] | None]],
     root_ctx: tuple,
     chain_to_page: dict[tuple, str],
-    visited_screenshots: list[bytes],
+    dedup: "PageDedup",
     visited_page_entries: list[tuple[str, bytes]],
-    id_comp,
     tracer: Tracer,
     trace_path: Path,
     app_log_dir: Path,
     max_depth: int,
     sample: int,
-) -> DfsPageNode | None:
+) -> tuple[DfsPageNode | None, dict]:
+    """Recursive DFS step. Phone is on the target page.
+
+    PRE:  phone is on this page (nav_stack top)
+    POST: phone is back on this page (after all children explored)
+
+    Returns (node, dedup_info) where dedup_info describes identity of this page.
+    """
     """Recursive DFS step. Phone is on the target page.
 
     PRE:  phone is on this page (nav_stack top)
     POST: phone is back on this page (after all children explored)
     """
-    from policy_expr.recon.page_parser import PageParser
-    from policy_expr.recon_cli import _check_knowledge_exists, _derive_page_name
-
     app = app_log_dir.name
 
     # Take screenshot first for mini-program check (before expensive LLM parse)
@@ -258,35 +248,59 @@ def _dfs_recursive(
     if close_xy is not None:
         print(f"  [小程序] 检测到小程序，跳过探测，直接关闭")
         _tap_close_xy(phone, close_xy)
-        return None
+        return None, {"is_new": False, "phase": "miniprogram"}
 
-    # Parse page identity
-    from policy_expr.recon.page_parser import PageParser
-    from policy_expr.recon_cli import _derive_page_name
-    knowledge = PageParser().analyze_screen(png_bytes)
-    page_name = _derive_page_name(knowledge.page.description)
+    # ── Dedup BEFORE LLM parse (saves LLM call for duplicate pages) ──
+    from policy_expr.recon.cascade_matcher import get_matcher
+    candidate_emb = get_matcher().embed_visual(png_bytes)
+    dedup_result = dedup.check(png_bytes, precomputed=candidate_emb)
+    lib_n = dedup_result.library_size
 
-    # Trace + visited check (using GUIClip for visual page identity)
     chain_key = tuple(nav_chain)
     parent_page = chain_to_page.get(chain_key[:-1]) if chain_key else None
     via_tap = nav_chain[-1][2] if nav_chain else None
-    chain_to_page[chain_key] = page_name
-
     _src = parent_page or ""
     _tap = via_tap or ""
 
-    # Check if this page has been visited before (by visual similarity)
-    for visited_bytes in visited_screenshots:
-        if id_comp.is_same_page(visited_bytes, png_bytes).matched:
-            print(f"  已访问（视觉相似），跳过: {page_name}")
-            tracer.record_transition(_src, _tap, page_name, "skipped_visited")
-            tracer.save(trace_path)
-            return None
+    # ── Dedup result + terminal output ──
+    n = dedup_result.library_size
+    is_dup = dedup_result.is_duplicate
+    _print_dedup(n, dedup_result)
 
-    visited_screenshots.append(png_bytes)
+    if is_dup:
+        tracer.record_transition(_src, _tap, "duplicate", "skipped_visited")
+        tracer.save(trace_path)
+        dedup_info = {
+            "is_new": False,
+            "phase": dedup_result.phase,
+            "visual_sim": round(dedup_result.best_visual_sim, 4),
+            "text_sim": round(dedup_result.best_text_sim, 4) if dedup_result.best_text_sim else None,
+            "library_size": n,
+            "matched_name": dedup_result.matched_name,
+        }
+        return None, dedup_info
+
+    # ── New page: now do expensive LLM parse ──
+    from policy_expr.recon.page_parser import PageParser
+    knowledge = PageParser().analyze_screen(png_bytes)
+    page_name = _page_name_from_desc(knowledge.page.description)
+
+    # Add to dedup library (reuse pre-computed embedding)
+    dedup.add(png_bytes, name=page_name, emb=candidate_emb)
+
+    chain_to_page[chain_key] = page_name
     visited_page_entries.append((page_name, png_bytes))
     tracer.record_page(page_name, parent_page, via_tap, len(nav_chain))
     tracer.save(trace_path)
+
+    # Dedup info to embed into ReconResult
+    dedup_info = {
+        "is_new": True,
+        "phase": dedup_result.phase,
+        "visual_sim": round(dedup_result.best_visual_sim, 4),
+        "text_sim": round(dedup_result.best_text_sim, 4) if dedup_result.best_text_sim else None,
+        "library_size": n,
+    }
 
     out_dir = app_log_dir / page_name
     node = DfsPageNode(
@@ -301,7 +315,7 @@ def _dfs_recursive(
         print(f"  [max_depth=0] 跳过探测，仅记录页面")
         tracer.record_transition(_src, _tap, page_name, "depth_limit")
         tracer.save(trace_path)
-        node.recon_result = None
+        return node, dedup_info
     else:
         tracer.record_transition(_src, _tap, page_name, "entered")
         tracer.save(trace_path)
@@ -326,9 +340,9 @@ def _dfs_recursive(
                 child_nav_stack = nav_stack[:-1] + [(parent_bytes, (lx, ly)), (after_bytes, None)]
 
                 # Recursive DFS into child
-                child_node = _dfs_recursive(
+                child_node, child_dedup = _dfs_recursive(
                     phone, child_chain, child_nav_stack, root_ctx,
-                    chain_to_page, visited_screenshots, visited_page_entries, id_comp, tracer, trace_path,
+                    chain_to_page, dedup, visited_page_entries, tracer, trace_path,
                     app_log_dir, max_depth - 1, sample,
                 )
 
@@ -354,8 +368,11 @@ def _dfs_recursive(
                             back_attempts=back_log,
                         )
 
-                # Update tap result with back attempts
+                # Update tap result
+                tap_result.child_status = _child_status(child_node, max_depth - 1)
                 tap_result.back_attempts = back_log
+                if child_dedup:
+                    tap_result.identity = child_dedup
 
                 return True  # Continue probing next element
 
@@ -368,10 +385,10 @@ def _dfs_recursive(
             tracer.record_error(page_name, e)
             tracer.save(trace_path)
             node.error = {"message": str(e)}
-            return node
+            return node, dedup_info
 
     # POST: phone on this page
-    return node
+    return node, dedup_info
 
 
 def generate_knowledge_postorder(nodes: list[DfsPageNode], app: str) -> None:
@@ -410,6 +427,17 @@ def _parse_identity(phone) -> tuple:
     knowledge = PageParser().analyze_screen(png_bytes)
     page_name = _page_name_from_desc(knowledge.page.description)
     return png_bytes, knowledge, page_name
+
+
+def _child_status(child_node, depth: int) -> str:
+    """Derive child exploration status from _dfs_recursive return value."""
+    if child_node is None:
+        return "duplicate"
+    if child_node.recon_result is not None:
+        return "new_explored"
+    if child_node.error:
+        return "error"
+    return "new_depth_limit"
 
 
 def _tap_close_xy(phone, close_xy: list[float]) -> None:
@@ -609,19 +637,33 @@ def compute_pairwise_similarity(
 
     pairs.sort(key=lambda x: x["similarity"], reverse=True)
 
-    print(f"\n{'=' * 70}")
-    print(f"页面两两相似度报告  共 {n} 个页面 / {len(pairs)} 对  阈值={threshold}")
-    print(f"{'=' * 70}")
-    for p in pairs:
-        flag = "  ⚠ 高相似" if p["similarity"] >= threshold else ""
-        print(f"  {p['page_a'][:24]:24s}  vs  {p['page_b'][:24]:24s}  {p['similarity']:.4f}{flag}")
-
-    above = [p for p in pairs if p["similarity"] >= threshold]
-    print(f"\n  >= {threshold}: {len(above)} 对 / {len(pairs)} 对")
-
     if save_path:
         save_path.parent.mkdir(parents=True, exist_ok=True)
         save_path.write_text(json.dumps({"threshold": threshold, "pairs": pairs}, ensure_ascii=False, indent=2))
-        print(f"  已保存: {save_path}")
 
     return pairs
+
+
+# ---------------------------------------------------------------------------
+# Dedup structured logging
+# ---------------------------------------------------------------------------
+# Dedup terminal output
+# ---------------------------------------------------------------------------
+
+def _print_dedup(n: int, result) -> None:
+    """Print dedup verdict to terminal."""
+    is_dup = result.is_duplicate
+    tag = "✓ 新页面" if not is_dup else "✗ 重复"
+    detail = ""
+    if is_dup:
+        detail = f"匹配「{result.matched_name}」"
+        if result.phase == "visual_shortcut":
+            detail += f" visual={result.best_visual_sim:.3f}"
+        elif result.phase == "text_match":
+            detail += f" text={result.best_text_sim:.3f}"
+    else:
+        detail = f"visual={result.best_visual_sim:.3f}"
+        if result.best_text_sim is not None:
+            detail += f" text={result.best_text_sim:.3f}"
+
+    print(f"  [已探测 {n} 页] {tag} — {detail}")

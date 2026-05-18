@@ -191,7 +191,7 @@ def make_comparator(method: str = "edge_iou") -> PageComparator:
             no_change_threshold=0.98,
         )
     if method == "cascade":
-        from policy_expr.recon.cascade_matcher import CascadeMatcher
-        cascade = CascadeMatcher()
+        from policy_expr.recon.cascade_matcher import get_matcher
+        cascade = get_matcher()
         return PageComparator(cascade=cascade)
     return PageComparator()

@@ -144,3 +144,18 @@ class CascadeMatcher:
         if a.text is None or b.text is None:
             raise ValueError("text embeddings not populated; call fill_text first")
         return float(np.dot(a.text, b.text))
+
+
+# ---------------------------------------------------------------------------
+# Process-wide singleton — avoids loading GUIClip more than once
+# ---------------------------------------------------------------------------
+
+_shared: CascadeMatcher | None = None
+
+
+def get_matcher(**kwargs) -> CascadeMatcher:
+    """Return the shared CascadeMatcher, creating it on first call."""
+    global _shared
+    if _shared is None:
+        _shared = CascadeMatcher(**kwargs)
+    return _shared

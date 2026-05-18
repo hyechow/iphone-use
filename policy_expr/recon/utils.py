@@ -44,6 +44,8 @@ class TapResult:
     screenshot_path: str
     navigated: bool = False
     back_attempts: list[dict] = field(default_factory=list)
+    child_status: str = ""  # "new_explored" / "new_depth_limit" / "duplicate" / "error"
+    identity: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -55,7 +57,7 @@ class ReconResult:
     taps: list[TapResult] = field(default_factory=list)
 
     def save(self, path: Path) -> None:
-        path.write_text(json.dumps({
+        data = {
             "description": self.description,
             "elements_count": self.elements_count,
             "initial_screenshot": self.initial_screenshot_path,
@@ -70,10 +72,13 @@ class ReconResult:
                     "navigated": t.navigated,
                     "screenshot": t.screenshot_path,
                     "back_attempts": t.back_attempts,
+                    "child_status": t.child_status,
+                    "identity": t.identity,
                 }
                 for t in self.taps
             ],
-        }, ensure_ascii=False, indent=2))
+        }
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
 
 
 # ── Visualization ─────────────────────────────────────────

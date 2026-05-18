@@ -114,25 +114,28 @@ def run_app(app: str, depth: int = 0, sample: int = 0) -> None:
 
     print(f"应用侦察: {app} (depth={depth}, sample={sample})")
     app_log_dir = LOG_ROOT / app
+    app_log_dir.mkdir(parents=True, exist_ok=True)
 
-    # Preload GUIClip model to avoid loading it during exploration
-    print("预加载 GUIClip 模型...")
-    from policy_expr.recon.back_nav import _get_identity_comp
-    import io
-    from PIL import Image
+    from policy_expr.runner import _tee_stdio
+    with _tee_stdio(app_log_dir):
+        # Preload GUIClip model to avoid loading it during exploration
+        print("预加载 GUIClip 模型...")
+        from policy_expr.recon.back_nav import _get_identity_comp
+        import io
+        from PIL import Image
 
-    # Create a dummy 1x1 white image to trigger model loading
-    dummy_img = io.BytesIO()
-    Image.new('RGB', (1, 1), color='white').save(dummy_img, format='PNG')
-    dummy_bytes = dummy_img.getvalue()
+        # Create a dummy 1x1 white image to trigger model loading
+        dummy_img = io.BytesIO()
+        Image.new('RGB', (1, 1), color='white').save(dummy_img, format='PNG')
+        dummy_bytes = dummy_img.getvalue()
 
-    # Call similarity once to trigger model loading
-    comp = _get_identity_comp()
-    comp.raw_similarity(dummy_bytes, dummy_bytes)  # This will trigger _ensure_loaded()
+        # Call similarity once to trigger model loading
+        comp = _get_identity_comp()
+        comp.raw_similarity(dummy_bytes, dummy_bytes)
 
-    with LivePhoneSession() as phone:
-        # Phase 1: DFS exploration (probe only, no knowledge gen)
-        tree = explore_dfs(phone, app_log_dir, max_depth=depth, sample=sample)
+        with LivePhoneSession() as phone:
+            # Phase 1: DFS exploration (probe only, no knowledge gen)
+            tree = explore_dfs(phone, app_log_dir, max_depth=depth, sample=sample)
 
         # Phase 2: Post-order knowledge generation (leaves first) — DISABLED
         # total = sum(1 + _count_tree_nodes(n.children) for n in tree)

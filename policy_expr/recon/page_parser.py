@@ -8,7 +8,7 @@ from typing import Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from llm.structured import invoke_structured
 from policy_expr.config import resolve_llm_config
@@ -61,6 +61,23 @@ class InteractiveElement(BaseModel):
     )
     x: float = Field(description="归一化 x 坐标（0-1000，左上角为原点）")
     y: float = Field(description="归一化 y 坐标（0-1000）")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fix_xy_string(cls, data: object) -> object:
+        """Handle LLM outputting x as '500, 410' (both coords in one field)."""
+        if not isinstance(data, dict):
+            return data
+        x_val = data.get("x")
+        if isinstance(x_val, str) and "," in x_val:
+            parts = [p.strip() for p in x_val.split(",", 1)]
+            try:
+                data["x"] = float(parts[0])
+                data["y"] = float(parts[1])
+            except ValueError:
+                pass
+        return data
+
     leads_to: str = Field(
         description="点击后的预期效果或目标页面，如「打开聊天详情」「展开搜索框」「返回上一页」"
     )
@@ -322,14 +339,14 @@ def _get_capsule_state():
     if _capsule_state is None:
         import json as _json
         import numpy as _np
-        from policy_expr.recon.cascade_matcher import CascadeMatcher, PageEmbedding
+        from policy_expr.recon.cascade_matcher import PageEmbedding, get_matcher
 
         if not _CAPSULE_REFS_PATH.exists() or not _CAPSULE_EMBS_PATH.exists():
             return None
 
         data = _json.loads(_CAPSULE_REFS_PATH.read_text())
         npz = _np.load(_CAPSULE_EMBS_PATH)
-        matcher = CascadeMatcher()
+        matcher = get_matcher()
         refs = data["references"]
         ref_embs = [PageEmbedding(visual=npz["embeddings"][i]) for i in range(len(refs))]
         if not ref_embs:
@@ -376,10 +393,6 @@ def detect_miniprogram(png_bytes: bytes) -> list[float] | None:
         close_xy = ref.get("close_xy")
         print(f"  [miniprogram detect] ✓ 命中「{ref['name']}」sim={best_sim:.3f}  close_xy={close_xy}")
         return close_xy
-    sims = ", ".join(f"{refs[i]['name']}={s:.3f}" for i, s in enumerate(
-        matcher.visual_sim(ref_embs[i], emb) for i in range(len(refs))
-    ))
-    print(f"  [miniprogram detect] ✗ 未命中 threshold={threshold}  {sims}")
     return None
 
 
