@@ -203,6 +203,7 @@ class ReconTap:
     navigated: bool
     after_url: str | None  # screenshot after tap
     back_seq: list[dict] = field(default_factory=list)  # {"src": data_url, "subtitle": str, "success": bool}
+    identity: dict = field(default_factory=dict)  # {"is_new", "phase", "visual_sim", "text_sim", "library_size", "matched_name"}
 
 
 @dataclass
@@ -597,6 +598,7 @@ class ReconReportBuilder:
                     navigated=navigated,
                     after_url=after_url,
                     back_seq=back_seq,
+                    identity=tap.get("identity", {}),
                 ))
 
             # Load flows
@@ -910,6 +912,18 @@ RECON_HTML_TEMPLATE = """\
     padding: 1px 6px; border-radius: 8px; margin-left: 4px;
     border: 1px solid #bbf7d0; white-space: nowrap;
   }}
+  .tap-identity {{
+    font-size: 10px; padding: 1px 6px; border-radius: 8px; margin-left: 4px; white-space: nowrap;
+  }}
+  .tap-identity-new {{
+    background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe;
+  }}
+  .tap-identity-dup {{
+    background: #fefce8; color: #a16207; border: 1px solid #fde68a;
+  }}
+  .tap-identity-scores {{
+    font-size: 10px; color: #94a3b8; font-family: monospace; margin-left: 4px;
+  }}
   .flow-extra-row td {{ color: var(--muted); font-style: italic; }}
   .tap-preview-btn {{
     font-size: 11px; padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border);
@@ -1159,10 +1173,34 @@ def _render_page_card_html(node: NavNode, path: list[str]) -> str:
     tap_rows = ""
     seq_scripts = ""
     for tap in page.taps:
+        # Build identity chip
+        identity_html = ""
+        ident = tap.identity
+        if ident and tap.navigated:
+            is_new = ident.get("is_new", True)
+            phase = ident.get("phase", "")
+            vis = ident.get("visual_sim")
+            txt = ident.get("text_sim")
+            matched_name = ident.get("matched_name")
+            if is_new:
+                phase_label = {"new_page": "新页面", "visual_shortcut": "新页面", "text_match": "新页面"}.get(phase, phase)
+                identity_html = f'<span class="tap-identity tap-identity-new">✦ {phase_label}</span>'
+            else:
+                phase_label = {"visual_shortcut": "视觉命中", "text_match": "语义命中"}.get(phase, phase)
+                detail = f"→ {matched_name}" if matched_name else ""
+                identity_html = f'<span class="tap-identity tap-identity-dup">⟳ {phase_label} {detail}</span>'
+            scores = []
+            if vis is not None:
+                scores.append(f"vis={vis:.2f}")
+            if txt is not None:
+                scores.append(f"txt={txt:.2f}")
+            if scores:
+                identity_html += f'<span class="tap-identity-scores">{" ".join(scores)}</span>'
+
         if tap.navigated:
             matched = flow_by_tap.get(tap.index)
             target_chip = f'<span class="tap-target">→ {matched.target_page}</span>' if matched else ''
-            status_html = f'<span class="tap-nav">✓ 导航成功</span>{target_chip}'
+            status_html = f'<span class="tap-nav">✓ 导航成功</span>{target_chip}{identity_html}'
             seq_key = f"{_slug(page.name)}-{tap.index}"
             if len(tap.back_seq) > 1:
                 # Full sequence available — emit JS and use openSeq button
