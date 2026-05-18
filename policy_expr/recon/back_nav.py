@@ -468,7 +468,7 @@ def return_to_initial(
         return tried
 
     current_bytes = before_back_bytes or initial_bytes
-    consecutive_unknown = 0  # 连续未知页计数，超过阈值直接跳 LLM
+    consecutive_unknown = 0  # 连续未知页计数；>=1 直接跳 LLM
 
     for _ in range(max_rounds):
         tried = _get_tried(current_bytes)
@@ -477,9 +477,9 @@ def return_to_initial(
             print("    [nav] 当前页面所有策略均已尝试，放弃")
             break
 
-        # 连续多次落入未知页（如小程序内部跳转），跳过 mechanical 直接用 LLM
-        skip_mechanical = "mechanical" in tried or consecutive_unknown >= 2
-        if "mechanical" not in tried and consecutive_unknown >= 2:
+        # 落入未知页时直接跳 LLM，避免一次无效的机械点击
+        skip_mechanical = "mechanical" in tried or consecutive_unknown >= 1
+        if "mechanical" not in tried and consecutive_unknown >= 1:
             print(f"    [nav] 连续 {consecutive_unknown} 次未知页，跳过机械策略直接调用 LLM")
         elif skip_mechanical:
             print("    [nav] 当前页面已试过机械回退，直接调用 LLM")
