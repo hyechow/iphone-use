@@ -28,10 +28,9 @@ BACK_SETTLE_SECONDS = 1.5
 
 # Two comparators with different responsibilities:
 # - _change_comp: edge IoU — fast no_change detection inside _try_tap
-# - _identity_comp: GUIClip — semantic page identity for _match_stack and page_records
-# Preload GUIClip at module import time to avoid loading it during exploration
+# - _identity_comp: CascadeMatcher (GUIClip + semantic) — page identity via get_matcher() singleton
 _change_comp: PageComparator = make_comparator("edge_iou")
-_identity_comp: PageComparator = make_comparator("guiclip")  # Triggers GUIClip model loading
+_identity_comp: PageComparator = make_comparator("cascade")
 
 
 def _get_change_comp() -> PageComparator:

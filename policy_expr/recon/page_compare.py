@@ -181,15 +181,8 @@ def make_comparator(method: str = "edge_iou") -> PageComparator:
     """Construct a PageComparator by method name.
 
     Args:
-        method: "edge_iou" (default), "guiclip", "cascade".
+        method: "edge_iou" (default), "cascade" (CascadeMatcher singleton).
     """
-    if method == "guiclip":
-        from policy_expr.recon.guiclip_backend import GUIClipBackend
-        return PageComparator(
-            backend=GUIClipBackend(),
-            same_page_threshold=0.90,
-            no_change_threshold=0.98,
-        )
     if method == "cascade":
         from policy_expr.recon.cascade_matcher import get_matcher
         cascade = get_matcher()
