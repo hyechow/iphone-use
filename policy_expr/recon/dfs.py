@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from policy_expr.executor import logical_xy
@@ -31,10 +33,13 @@ class DfsPageNode:
 
 
 def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
-                sample: int = 0) -> list[DfsPageNode]:
+                sample: int = 0, mode: str | None = None,
+                target_dir: str | None = None) -> list[DfsPageNode]:
     """Top-level DFS exploration.
 
     Phone must be on the root page.
+    mode: None=initial, "add"=add to existing app, "update"=re-probe target page.
+    target_dir: required for "update" mode, the page directory name to overwrite.
     Returns tree of explored pages (children attached).
     """
     from policy_expr.recon.page_parser import PageParser
@@ -53,6 +58,10 @@ def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
     png_bytes = phone.screenshot()
     knowledge = PageParser().analyze_screen(png_bytes)
     page_name = _page_name_from_desc(knowledge.page.description)
+
+    # update mode: use target_dir as page_name and out_dir
+    if mode == "update" and target_dir:
+        page_name = target_dir
 
     nav_stack: list[tuple[bytes, tuple[float, float] | None]] = [(png_bytes, None)]
 
@@ -85,6 +94,7 @@ def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
         # Enter child page
         print(f"\n  → 进入子页面「{area.label}」")
         print(f"    [DEBUG ROOT] Entering child page: max_depth={max_depth}, will pass {max_depth - 1} to child")
+        time.sleep(1.5)  # 等待子页面加载稳定
         ax, ay = area.center_xy
         lx, ly = logical_xy(ax, ay)
         child_chain = [(lx, ly, area.label)]
@@ -136,6 +146,7 @@ def explore_dfs(phone, app_log_dir: Path, max_depth: int = 0,
             sample=sample, nav_stack=nav_stack,
             on_element_tapped=_on_root_element_tapped,
         )
+        _update_recon_log(app_log_dir, page_name, mode or "initial")
     except ProbeAbortedError as e:
         tracer.record_error(page_name, e)
         tracer.save(trace_path)
@@ -300,6 +311,8 @@ def _dfs_recursive(
         "visual_sim": round(dedup_result.best_visual_sim, 4),
         "text_sim": round(dedup_result.best_text_sim, 4) if dedup_result.best_text_sim else None,
         "library_size": n,
+        "page_name": page_name,
+        "description": knowledge.page.description,
     }
 
     out_dir = app_log_dir / page_name
@@ -315,6 +328,7 @@ def _dfs_recursive(
         print(f"  [max_depth=0] 跳过探测，仅记录页面")
         tracer.record_transition(_src, _tap, page_name, "depth_limit")
         tracer.save(trace_path)
+        _update_recon_log(app_log_dir, page_name, "initial")
         return node, dedup_info
     else:
         tracer.record_transition(_src, _tap, page_name, "entered")
@@ -331,6 +345,7 @@ def _dfs_recursive(
                 # Enter child page
                 print(f"\n  → 进入子页面「{area.label}」")
                 print(f"    [DEBUG] Entering child page: max_depth={max_depth}, will pass {max_depth - 1} to child")
+                time.sleep(1.5)  # 等待子页面加载稳定
                 ax, ay = area.center_xy
                 lx, ly = logical_xy(ax, ay)
                 child_chain = nav_chain + [(lx, ly, area.label)]
@@ -381,6 +396,7 @@ def _dfs_recursive(
                 sample=sample, nav_stack=nav_stack,
                 on_element_tapped=_on_element_tapped,
             )
+            _update_recon_log(app_log_dir, page_name, "initial")
         except ProbeAbortedError as e:
             tracer.record_error(page_name, e)
             tracer.save(trace_path)
@@ -548,7 +564,8 @@ def _probe_page_dfs(phone, knowledge, png_bytes, out_dir: Path,
         time.sleep(2.0)
 
         after_bytes = phone.screenshot()
-        after_path = tap_dir / f"tap_{i:02d}_{area.label}.png"
+        safe_label = _sanitize_filename(area.label)
+        after_path = tap_dir / f"tap_{i:02d}_{safe_label}.png"
         if after_bytes:
             after_path.write_bytes(after_bytes)
             print(f"    截图: {after_path}")
@@ -600,6 +617,26 @@ def _page_name_from_desc(description: str) -> str:
     name = description[:20].strip()
     name = re.sub(r'[\\/:*?"<>|\s]+', '_', name)
     return name or "page"
+
+
+def _sanitize_filename(label: str) -> str:
+    """Sanitize a label for use as a filename component."""
+    import re
+    return re.sub(r'[\\/:*?"<>|\s]+', '_', label)[:40] or "item"
+
+
+def _update_recon_log(app_log_dir: Path, page_dir: str, trigger: str) -> None:
+    """Append/update one page entry in recon_log.json."""
+    log_path = app_log_dir / "recon_log.json"
+    log: dict = {}
+    if log_path.exists():
+        log = json.loads(log_path.read_text("utf-8"))
+
+    log[page_dir] = {
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "trigger": trigger,
+    }
+    log_path.write_text(json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

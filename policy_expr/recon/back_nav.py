@@ -92,8 +92,6 @@ def tap_back(client) -> tuple[float, float, str]:
     lx, ly = logical_xy(*BACK_TAP_CENTER)
     result = client.tap(lx, ly)
     return lx, ly, result
-    result = client.tap(lx, ly)
-    return lx, ly, result
 
 
 def tap_llm_back(client, action: BackAction) -> tuple[float, float, str] | None:
@@ -267,7 +265,7 @@ def _try_tap(
 ) -> tuple[float, float, bytes] | None:
     """Execute one tap, check if page changed.
 
-    tap_fn: performs the tap, returns (lx, ly, ...) or None if can't tap.
+    tap_fn: performs the tap, returns (lx, ly, response, ...) or None if can't tap.
     Returns (lx, ly, after_bytes) if page changed, None otherwise.
     """
     coords = tap_fn()
@@ -275,6 +273,15 @@ def _try_tap(
         return None
 
     lx, ly = coords[0], coords[1]
+    tap_response = coords[2] if len(coords) > 2 else ""
+    tap_failed = tap_response and ("failed" in tap_response.lower() or "interrupted" in tap_response.lower())
+    if tap_failed:
+        print(f"    ↩ [{strategy}] ({lx:.0f},{ly:.0f}) → tap 失败: {tap_response}")
+        log.append({"strategy": strategy, "coords": [round(lx), round(ly)],
+                    "result": f"tap 失败: {tap_response}",
+                    "success": False, "screenshot": ""})
+        return None
+
     time.sleep(BACK_SETTLE_SECONDS)
     after_bytes = screenshot()
 
@@ -342,7 +349,7 @@ def _execute_tap_tiers(
             save_path = back_shot_path(out_dir, tap_index, len(log) + 1)
             result = _try_tap(
                 client, screenshot, before_bytes, "YOLO",
-                lambda: (client.tap(lx, ly), (lx, ly))[1], log, save_path,
+                lambda: (lx, ly, client.tap(lx, ly)), log, save_path,
             )
             if result is not None:
                 return result
@@ -531,31 +538,6 @@ def return_to_initial(
         if log:
             log[-1]["result"] = f"未知页 (initial: {sim_to_initial:.3f}, stack_max: {max_sim:.3f})"
             log[-1]["score"] = round(sim_to_initial, 3)
-
-        # Parallel page detection: if low similarity with all stack pages, tap bottom tab
-        if max_sim < 0.75:
-            print(f"    [平行页] 检测为平行页面 (最大相似度 {max_sim:.3f} < 0.75)")
-            # Try tapping bottom tab to return to common ancestor
-            from policy_expr.executor import logical_xy
-            tap_x, tap_y = logical_xy(500.0, 950.0)  # Approximate bottom tab center
-            client.tap(tap_x, tap_y)
-            time.sleep(BACK_SETTLE_SECONDS)
-            after_tab_bytes = screenshot()
-
-            # Check if tapping bottom tab helped
-            tab_match = _match_stack(id_comp, nav_stack, after_tab_bytes)
-            if tab_match >= 0:
-                print(f"    [平行页] bottom_tab后匹配到 L{tab_match}")
-                if log:
-                    log.append({"strategy": "bottom_tab", "coords": [round(tap_x), round(tap_y)],
-                                "result": f"L{tab_match}", "success": True, "screenshot": ""})
-                current_bytes = after_tab_bytes
-                continue  # Try normal back navigation from this new page
-            else:
-                print(f"    [平行页] bottom_tab后仍未匹配到stack")
-                if log:
-                    log.append({"strategy": "bottom_tab", "coords": [round(tap_x), round(tap_y)],
-                                "result": "未知页", "success": False, "screenshot": ""})
 
         current_bytes = back_bytes
 

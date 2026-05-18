@@ -42,7 +42,13 @@ uv run python -m policy_expr.recon_cli --app 微信
 # DFS 多页探索，depth=N 决定可生成知识的页面层数
 # depth=1：探测根页面所有子节点 → 可生成根页面的知识
 # depth=2：再探测每个子节点的子节点 → 可生成根页面及其子页面的知识
-uv run python -m policy_expr.recon_cli --app 微信 --depth 1
+uv run python -m policy_expr.recon_cli --app 微信 --depth 1 --sample 2
+
+# 新增页面：手动导航到新页面后，加入已有应用的知识库
+uv run python -m policy_expr.recon_cli --app 微信 --mode add --depth 1 --sample 2
+
+# 更新页面：手动导航到目标页面后，重新探测指定页面（子页面仍走常规去重）
+uv run python -m policy_expr.recon_cli --app 微信 --mode update --target "微信主界面，显示聊天列表和底部导航栏。"
 
 # 在线探测（截图 → probe，不生成知识库）
 uv run python -m policy_expr.recon_cli --debug-parse
@@ -78,8 +84,15 @@ uv run python scripts/collect_screenshot_dataset.py 微信 --depth 2 --sample 3
 1. **解析身份** — 截图 → LLM 识别页面签名
 2. **去重检查** — 查找 `knowledge/{app}/` 下是否已有相同签名的 skill
 3. **元素探测** — 逐个点击可交互元素，记录跳转结果 → `logs/recon/{app}/{page}/`
-4. **功能描述** — 对每个元素生成点击后的跳转描述 → `page_flows.json`
-5. **知识抽象** — LLM 合并同类、去除私有信息 → `knowledge/{app}/{page}.md`
+4. **操作日志** — 每探测完一个页面，更新 `logs/recon/{app}/recon_log.json`（记录 trigger: initial/add/update）
+
+### `--mode` 操作模式
+
+| 模式 | 触发 trigger | 用途 |
+|------|------------|------|
+| 无（默认） | `initial` | 首次探索应用 |
+| `add` | `add` | 手动导航到新页面后，加入已有应用 |
+| `update` | `update` | 重新探测指定页面，需配合 `--target` 指定目录名 |
 
 ### `--depth N` 的含义
 

@@ -102,17 +102,24 @@ def _probe_page(phone, knowledge, png_bytes, out_dir: Path, sample: int = 0,
 
 # ── Commands ─────────────────────────────────────────────
 
-def run_app(app: str, depth: int = 0, sample: int = 0) -> None:
+def run_app(app: str, depth: int = 0, sample: int = 0,
+            mode: str | None = None, target: str | None = None) -> None:
     """Online recon with DFS depth control.
 
     depth=0: explore current page only.
     depth=N: DFS explore discovered pages (up to N levels deep).
-    Knowledge is generated bottom-up after all pages are explored.
+    mode: None=initial, "add"=add page to existing app, "update"=re-probe target page.
+    target: required when mode="update", the page directory name to overwrite.
     """
     from policy_expr.perception import LivePhoneSession
     from policy_expr.recon.dfs import explore_dfs, generate_knowledge_postorder
 
-    print(f"应用侦察: {app} (depth={depth}, sample={sample})")
+    if mode == "update" and not target:
+        print("错误: --mode update 需要指定 --target <页面目录名>")
+        raise SystemExit(1)
+
+    mode_label = {"add": "新增", "update": "更新"}.get(mode, "侦察")
+    print(f"应用{mode_label}: {app} (depth={depth}, sample={sample})")
     app_log_dir = LOG_ROOT / app
     app_log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -135,7 +142,8 @@ def run_app(app: str, depth: int = 0, sample: int = 0) -> None:
 
         with LivePhoneSession() as phone:
             # Phase 1: DFS exploration (probe only, no knowledge gen)
-            tree = explore_dfs(phone, app_log_dir, max_depth=depth, sample=sample)
+            tree = explore_dfs(phone, app_log_dir, max_depth=depth, sample=sample,
+                               mode=mode, target_dir=target)
 
         # Phase 2: Post-order knowledge generation (leaves first) — DISABLED
         # total = sum(1 + _count_tree_nodes(n.children) for n in tree)
@@ -233,13 +241,16 @@ def main() -> None:
     ap.add_argument("--app", type=str, metavar="NAME", help="在线侦察指定应用，自动完成 recon→learn→knowledge")
     ap.add_argument("--depth", type=int, default=0, metavar="N", help="DFS 探索深度，0=仅当前页面 (默认)")
     ap.add_argument("--sample", type=int, default=0, metavar="N", help="每个页面随机采样 N 个元素探测，0=全部 (默认)")
+    ap.add_argument("--mode", choices=["add", "update"], metavar="MODE", help="add=新增页面到已有应用, update=重新探测指定页面")
+    ap.add_argument("--target", type=str, metavar="DIR", help="--mode update 时指定要更新的页面目录名")
     ap.add_argument("--debug-parse", nargs="*", type=Path, metavar="PATH", help="[调试] 解析图片，无参数则在线截图")
     ap.add_argument("--debug-learn", type=Path, metavar="JSON", help="[调试] 从侦察结果生成功能流程描述")
     ap.add_argument("--debug-knowledge", type=Path, metavar="DIR", help="[调试] 从侦察目录构建页面操作知识库")
     args = ap.parse_args()
 
     if args.app:
-        run_app(args.app, depth=args.depth, sample=args.sample)
+        run_app(args.app, depth=args.depth, sample=args.sample,
+                mode=args.mode, target=args.target)
     elif args.debug_learn:
         run_learn(args.debug_learn)
     elif args.debug_knowledge:
